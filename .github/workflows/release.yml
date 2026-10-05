@@ -146,11 +146,22 @@ jobs:
           $packageConfig = Join-Path $prefix "share\cmake\SPIRV-Headers\SPIRV-HeadersConfig.cmake"
           if (-not (Test-Path $packageConfig)) { throw "SPIRV-Headers CMake package was not installed" }
 
+      - name: Ensure Ninja is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Ninja installation failed" }
+          }
+          ninja --version
+          if ($LASTEXITCODE -ne 0) { throw "Ninja is unavailable" }
+
       - name: Build Vulkan-enabled release
         run: cargo build --release --locked --features vulkan --target-dir D:\t --jobs 1
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: "1"
           CMAKE_PREFIX_PATH: D:\spirv-headers
+          CMAKE_GENERATOR: Ninja
 
       - name: Package Vulkan OTA archive
         shell: pwsh
