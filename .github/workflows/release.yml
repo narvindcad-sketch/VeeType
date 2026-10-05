@@ -149,6 +149,7 @@ jobs:
       - name: Build Vulkan-enabled release
         run: cargo build --release --locked --features vulkan --target-dir D:\t --jobs 1
         env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "1"
           CMAKE_PREFIX_PATH: D:\spirv-headers
 
       - name: Package Vulkan OTA archive
