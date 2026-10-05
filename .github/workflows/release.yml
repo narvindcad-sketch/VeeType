@@ -48,23 +48,30 @@ jobs:
       - name: Validate desktop licensing configuration
         shell: pwsh
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:VEETYPE_SUPABASE_URL) -or
-              [string]::IsNullOrWhiteSpace($env:VEETYPE_SUPABASE_ANON_KEY) -or
-              [string]::IsNullOrWhiteSpace($env:VEETYPE_LICENSE_PUBLIC_KEY_B64)) {
-            throw "Set VEETYPE_SUPABASE_URL, VEETYPE_SUPABASE_ANON_KEY, and VEETYPE_LICENSE_PUBLIC_KEY_B64 as GitHub Actions repository variables before publishing a release."
-          }
-          $supabaseUrl = $null
-          if (-not [Uri]::TryCreate($env:VEETYPE_SUPABASE_URL, [UriKind]::Absolute, [ref]$supabaseUrl) -or
-              $supabaseUrl.Scheme -ne "https") {
-            throw "VEETYPE_SUPABASE_URL must be an HTTPS URL."
-          }
-          try {
-            $publicKey = [Convert]::FromBase64String($env:VEETYPE_LICENSE_PUBLIC_KEY_B64)
-          } catch {
-            throw "VEETYPE_LICENSE_PUBLIC_KEY_B64 must contain valid base64."
-          }
-          if ($publicKey.Length -ne 32) {
-            throw "VEETYPE_LICENSE_PUBLIC_KEY_B64 must decode to a 32-byte Ed25519 public key."
+          $licenseSettings = @(
+            $env:VEETYPE_SUPABASE_URL,
+            $env:VEETYPE_SUPABASE_ANON_KEY,
+            $env:VEETYPE_LICENSE_PUBLIC_KEY_B64
+          )
+          $configuredSettings = @($licenseSettings | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          if ($configuredSettings.Count -eq 0) {
+            Write-Host "::warning::Desktop licensing is not configured; this release will support the free tier only."
+          } elseif ($configuredSettings.Count -ne $licenseSettings.Count) {
+            throw "Configure VEETYPE_SUPABASE_URL, VEETYPE_SUPABASE_ANON_KEY, and VEETYPE_LICENSE_PUBLIC_KEY_B64 together as GitHub Actions repository variables."
+          } else {
+            $supabaseUrl = $null
+            if (-not [Uri]::TryCreate($env:VEETYPE_SUPABASE_URL, [UriKind]::Absolute, [ref]$supabaseUrl) -or
+                $supabaseUrl.Scheme -ne "https") {
+              throw "VEETYPE_SUPABASE_URL must be an HTTPS URL."
+            }
+            try {
+              $publicKey = [Convert]::FromBase64String($env:VEETYPE_LICENSE_PUBLIC_KEY_B64)
+            } catch {
+              throw "VEETYPE_LICENSE_PUBLIC_KEY_B64 must contain valid base64."
+            }
+            if ($publicKey.Length -ne 32) {
+              throw "VEETYPE_LICENSE_PUBLIC_KEY_B64 must decode to a 32-byte Ed25519 public key."
+            }
           }
 
       - name: Validate Azure Artifact Signing configuration
