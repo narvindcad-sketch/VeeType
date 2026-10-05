@@ -10,23 +10,24 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context};
 use windows_sys::Win32::Foundation::{GetLastError, HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, EndPaint,
-    FillRect, GetMonitorInfoW, GetStockObject, InvalidateRect, MonitorFromWindow, RoundRect,
-    SelectObject, SetBkMode, SetTextColor, SetWindowRgn, UpdateWindow, DT_LEFT, DT_SINGLELINE,
-    DT_VCENTER, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_PEN, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetMonitorInfoW,
+    GetStockObject, InvalidateRect, MonitorFromWindow, RoundRect, SelectObject, UpdateWindow,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_PEN,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
     GetSystemMetrics, PeekMessageW, RegisterClassW, SetLayeredWindowAttributes, SetWindowPos,
-    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, LWA_ALPHA, MSG, PM_REMOVE,
-    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WM_PAINT, WM_QUIT,
-    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, LWA_COLORKEY, MSG,
+    PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+    WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-const WINDOW_WIDTH: i32 = 336;
-const WINDOW_HEIGHT: i32 = 78;
-const VISIBLE_ALPHA: f32 = 246.0;
+const WINDOW_WIDTH: i32 = 300;
+const WINDOW_HEIGHT: i32 = 100;
+const WAVEFORM_BAR_COUNT: usize = 15;
+const TRANSPARENT_COLOR: u32 = 0x00FF00FF;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OverlayState {
@@ -36,27 +37,11 @@ pub enum OverlayState {
 }
 
 impl OverlayState {
-    fn label(self) -> &'static str {
+    fn waveform_scale(self) -> f32 {
         match self {
-            Self::Idle => "Ready when you are",
-            Self::Listening => "Listening to your voice",
-            Self::Processing => "Polishing your text",
-        }
-    }
-
-    fn indicator(self) -> &'static str {
-        match self {
-            Self::Idle => "READY",
-            Self::Listening => "LIVE",
-            Self::Processing => "REFINING",
-        }
-    }
-
-    fn accent(self) -> u32 {
-        match self {
-            Self::Idle => rgb(165, 156, 184),
-            Self::Listening => rgb(126, 109, 255),
-            Self::Processing => rgb(166, 135, 255),
+            Self::Idle => 0.0,
+            Self::Listening => 1.0,
+            Self::Processing => 0.68,
         }
     }
 }
@@ -193,18 +178,9 @@ fn create_window() -> anyhow::Result<HWND> {
             ));
         }
 
-        if SetLayeredWindowAttributes(hwnd, 0, 238, LWA_ALPHA) == 0 {
+        if SetLayeredWindowAttributes(hwnd, TRANSPARENT_COLOR, u8::MAX, LWA_COLORKEY) == 0 {
             return Err(anyhow!(
                 "SetLayeredWindowAttributes failed with Windows error {}",
-                GetLastError()
-            ));
-        }
-
-        let region = CreateRoundRectRgn(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 38, 38);
-        if region != 0 && SetWindowRgn(hwnd, region, 1) == 0 {
-            DeleteObject(region);
-            return Err(anyhow!(
-                "SetWindowRgn failed with Windows error {}",
                 GetLastError()
             ));
         }
@@ -251,12 +227,6 @@ fn run_message_loop(hwnd: HWND, receiver: Receiver<OverlayCommand>) -> anyhow::R
                 });
 
                 unsafe {
-                    if SetLayeredWindowAttributes(hwnd, 0, VISIBLE_ALPHA as u8, LWA_ALPHA) == 0 {
-                        return Err(anyhow!(
-                            "SetLayeredWindowAttributes failed with Windows error {}",
-                            GetLastError()
-                        ));
-                    }
                     if SetWindowPos(
                         hwnd,
                         HWND_TOPMOST,
@@ -279,15 +249,7 @@ fn run_message_loop(hwnd: HWND, receiver: Receiver<OverlayCommand>) -> anyhow::R
             }
             Ok(OverlayCommand::Hide) => {
                 visible = false;
-                unsafe {
-                    if SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA) == 0 {
-                        return Err(anyhow!(
-                            "SetLayeredWindowAttributes failed with Windows error {}",
-                            GetLastError()
-                        ));
-                    }
-                    ShowWindow(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE);
-                }
+                unsafe { ShowWindow(hwnd, windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE) };
             }
             Ok(OverlayCommand::Volume(volume)) => {
                 VISUAL_STATE.with(|visual| visual.borrow_mut().volume = volume);
@@ -346,12 +308,12 @@ fn overlay_position() -> (i32, i32) {
             let work = monitor_info.rcWork;
             (
                 work.left + (work.right - work.left - WINDOW_WIDTH) / 2,
-                work.bottom - WINDOW_HEIGHT - 28,
+                work.bottom - WINDOW_HEIGHT - 42,
             )
         } else {
             (
                 (GetSystemMetrics(SM_CXSCREEN) - WINDOW_WIDTH) / 2,
-                GetSystemMetrics(SM_CYSCREEN) - WINDOW_HEIGHT - 72,
+                GetSystemMetrics(SM_CYSCREEN) - WINDOW_HEIGHT - 86,
             )
         }
     }
@@ -383,170 +345,54 @@ unsafe fn paint_window(hwnd: HWND) {
 
     let previous_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
     let visual = VISUAL_STATE.with(|state| *state.borrow());
-    let background = CreateSolidBrush(rgb(23, 20, 31));
+    let background = CreateSolidBrush(TRANSPARENT_COLOR);
     if background != 0 {
         FillRect(hdc, &bounds, background);
     }
 
-    let outer_glow = CreateSolidBrush(rgb(37, 30, 57));
-    if outer_glow != 0 {
-        let previous_brush = SelectObject(hdc, outer_glow);
-        Ellipse(hdc, 6, 6, 84, 72);
-        SelectObject(hdc, previous_brush);
-        DeleteObject(outer_glow);
-    }
-
-    let logo_tile = CreateSolidBrush(rgb(84, 70, 223));
-    if logo_tile != 0 {
-        let previous_brush = SelectObject(hdc, logo_tile);
-        RoundRect(hdc, 17, 13, 67, 65, 18, 18);
-        SelectObject(hdc, previous_brush);
-        DeleteObject(logo_tile);
-    }
-
-    let logo_mark = CreateSolidBrush(rgb(245, 242, 255));
-    if logo_mark != 0 {
-        let previous_brush = SelectObject(hdc, logo_mark);
-        let mark_heights = [10, 21, 15, 24, 12];
-        for (index, height) in mark_heights.iter().enumerate() {
-            let x = 27 + index as i32 * 6;
-            RoundRect(hdc, x, 39 - height / 2, x + 3, 39 + height / 2, 3, 3);
-        }
-        SelectObject(hdc, previous_brush);
-        DeleteObject(logo_mark);
-    }
-
-    match visual.state {
-        OverlayState::Listening => {
-            let pulse = visual.phase.sin().abs() * 0.25;
-            let dynamic_volume = (visual.volume * 14.0).max(pulse);
-            let base_heights = [8.0_f32, 15.0, 10.0, 19.0, 12.0, 17.0, 8.0];
-            for (index, base_height) in base_heights.iter().enumerate() {
-                let wave = ((visual.phase + index as f32 * 0.8).sin() + 1.0) * 0.5;
-                let height =
-                    (base_height * (0.35 + dynamic_volume + wave * 0.45)).clamp(4.0, 28.0) as i32;
-                let x = 268 + index as i32 * 7;
-                let color = if index % 2 == 0 {
-                    rgb(126, 109, 255)
-                } else {
-                    rgb(181, 163, 255)
-                };
-                let brush = CreateSolidBrush(color);
-                if brush != 0 {
-                    let previous_brush = SelectObject(hdc, brush);
-                    RoundRect(hdc, x, 39 - height / 2, x + 4, 39 + height / 2, 4, 4);
-                    SelectObject(hdc, previous_brush);
-                    DeleteObject(brush);
-                }
-            }
-        }
-        OverlayState::Processing => {
-            let pulse = (visual.phase.sin() + 1.0) * 0.5;
-            let radius = 4.0 + pulse * 3.0;
-            let glow = CreateSolidBrush(rgb(70, 51, 112));
-            if glow != 0 {
-                let previous_brush = SelectObject(hdc, glow);
-                Ellipse(
-                    hdc,
-                    290 - (radius + 7.0) as i32,
-                    39 - (radius + 7.0) as i32,
-                    290 + (radius + 7.0) as i32,
-                    39 + (radius + 7.0) as i32,
-                );
-                SelectObject(hdc, previous_brush);
-                DeleteObject(glow);
-            }
-            let brush = CreateSolidBrush(rgb(181, 163, 255));
-            if brush != 0 {
-                let previous_brush = SelectObject(hdc, brush);
-                Ellipse(
-                    hdc,
-                    290 - radius as i32,
-                    39 - radius as i32,
-                    290 + radius as i32,
-                    39 + radius as i32,
-                );
-                SelectObject(hdc, previous_brush);
-                DeleteObject(brush);
-            }
-            for (index, x) in [270, 310].iter().enumerate() {
-                let dot_radius = 3 + ((visual.phase + index as f32).sin().abs() * 2.0) as i32;
-                let brush = CreateSolidBrush(rgb(126, 109, 255));
-                if brush != 0 {
-                    let previous_brush = SelectObject(hdc, brush);
-                    Ellipse(
-                        hdc,
-                        *x - dot_radius,
-                        39 - dot_radius,
-                        *x + dot_radius,
-                        39 + dot_radius,
-                    );
-                    SelectObject(hdc, previous_brush);
-                    DeleteObject(brush);
-                }
-            }
-        }
-        OverlayState::Idle => {
-            let brush = CreateSolidBrush(visual.state.accent());
-            if brush != 0 {
-                let previous_brush = SelectObject(hdc, brush);
-                Ellipse(hdc, 283, 32, 297, 46);
-                SelectObject(hdc, previous_brush);
-                DeleteObject(brush);
-            }
-        }
-    }
-    SetBkMode(hdc, TRANSPARENT as i32);
-    SetTextColor(hdc, rgb(255, 248, 255));
-    let brand = wide("VeeType");
-    let mut brand_bounds = RECT {
-        left: 83,
-        top: 9,
-        right: 246,
-        bottom: 41,
-    };
-    DrawTextW(
-        hdc,
-        brand.as_ptr(),
-        "VeeType".encode_utf16().count() as i32,
-        &mut brand_bounds,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    SetTextColor(hdc, rgb(196, 185, 211));
-    let status = wide(visual.state.label());
-    let mut status_bounds = RECT {
-        left: 83,
-        top: 37,
-        right: 253,
-        bottom: 68,
-    };
-    DrawTextW(
-        hdc,
-        status.as_ptr(),
-        visual.state.label().encode_utf16().count() as i32,
-        &mut status_bounds,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
-    SetTextColor(hdc, visual.state.accent());
-    let indicator = wide(visual.state.indicator());
-    let mut indicator_bounds = RECT {
-        left: 258,
-        top: 59,
-        right: WINDOW_WIDTH - 17,
-        bottom: 74,
-    };
-    DrawTextW(
-        hdc,
-        indicator.as_ptr(),
-        visual.state.indicator().encode_utf16().count() as i32,
-        &mut indicator_bounds,
-        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-    );
+    draw_waveform(hdc, visual);
     SelectObject(hdc, previous_pen);
     EndPaint(hwnd, &paint);
     if background != 0 {
         DeleteObject(background);
     }
+}
+
+unsafe fn draw_waveform(hdc: windows_sys::Win32::Graphics::Gdi::HDC, visual: VisualState) {
+    let heights = waveform_heights(visual.phase, visual.volume, visual.state);
+    let color = CreateSolidBrush(rgb(86, 85, 214));
+    if color == 0 {
+        return;
+    }
+
+    let previous_brush = SelectObject(hdc, color);
+    let center_x = WINDOW_WIDTH / 2;
+    let center_y = WINDOW_HEIGHT / 2;
+    for (index, height) in heights.into_iter().enumerate() {
+        let x = center_x + (index as i32 - (WAVEFORM_BAR_COUNT as i32 - 1) / 2) * 14;
+        RoundRect(
+            hdc,
+            x - 4,
+            center_y - height / 2,
+            x + 4,
+            center_y + height / 2,
+            8,
+            8,
+        );
+    }
+    SelectObject(hdc, previous_brush);
+    DeleteObject(color);
+}
+
+fn waveform_heights(phase: f32, volume: f32, state: OverlayState) -> [i32; WAVEFORM_BAR_COUNT] {
+    let scale = state.waveform_scale();
+    std::array::from_fn(|index| {
+        let wave = ((phase + index as f32 * 0.4).sin() * 0.5 + 0.5).abs();
+        let microphone_boost = volume.clamp(0.0, 1.0) * wave * 18.0;
+        ((15.0 + 60.0 * wave + microphone_boost) * scale)
+            .round()
+            .clamp(6.0, 90.0) as i32
+    })
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -555,4 +401,23 @@ fn wide(value: &str) -> Vec<u16> {
 
 fn rgb(red: u8, green: u8, blue: u8) -> u32 {
     u32::from(red) | (u32::from(green) << 8) | (u32::from(blue) << 16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{waveform_heights, OverlayState, WAVEFORM_BAR_COUNT};
+
+    #[test]
+    fn waveform_has_fifteen_bounded_bars() {
+        let heights = waveform_heights(1.2, 0.5, OverlayState::Listening);
+        assert_eq!(heights.len(), WAVEFORM_BAR_COUNT);
+        assert!(heights.iter().all(|height| (6..=90).contains(height)));
+    }
+
+    #[test]
+    fn microphone_level_changes_waveform_height() {
+        let quiet = waveform_heights(0.8, 0.0, OverlayState::Listening);
+        let loud = waveform_heights(0.8, 1.0, OverlayState::Listening);
+        assert!(loud.iter().zip(quiet).any(|(loud, quiet)| loud > &quiet));
+    }
 }
