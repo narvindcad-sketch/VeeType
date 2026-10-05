@@ -1,0 +1,27 @@
+[settings]
+hotkey = "RightAlt"
+max_tokens = 64
+provider = "local"
+groq_model = "llama-3.3-70b-versatile"
+language = "auto"
+translate_to_english = true
+auto_start = false
+hands_free = false
+silence_timeout_ms = 1500
+
+# Optional provider/model override. Supported providers: "local", "groq", "openai".
+# Cloud API keys belong in the GROQ_API_KEY or OPENAI_API_KEY environment variable.
+# [api]
+# provider = "groq"
+# model = "llama-3.3-70b-versatile"
+
+[prompts]
+default = "You are a professional text-cleaning assistant. Clean up the user's raw voice transcript, remove filler words (like 'um', 'uh', 'ah'), fix punctuation, and output ONLY the polished text."
+coding = "You are a technical dictation assistant. Format the user's speech into clean technical notes, documentation, or code comments. Remove filler words and fix punctuation."
+professional = "You are a professional writing assistant. Format the user's speech into polished, formal, well-punctuated business prose. Remove all filler words."
+
+[vocabulary]
+"api" = "API"
+"rust" = "Rust"
+"llm" = "LLM"
+"github" = "GitHub"
