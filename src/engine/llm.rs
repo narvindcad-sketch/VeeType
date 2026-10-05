@@ -4,8 +4,8 @@ use anyhow::Context;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
+use llama_cpp_2::model::{params::LlamaModelParams, AddBos};
 use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 use sysinfo::System;
 
@@ -196,8 +196,9 @@ impl LocalLlm {
             system_prompt, raw_text
         );
 
-        let vocab = model.vocab();
-        let tokens = vocab.tokenize(prompt.as_bytes(), true, true);
+        let tokens = model
+            .str_to_token(&prompt, AddBos::Always)
+            .context("Failed to tokenize the prompt")?;
         let mut batch = LlamaBatch::new(tokens.len(), 1);
         for (i, &token) in tokens.iter().enumerate() {
             batch
@@ -208,38 +209,21 @@ impl LocalLlm {
             .context("Failed to decode the prompt")?;
 
         let mut generated_text = String::new();
-        let mut pending_bytes = Vec::new();
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut current_position = tokens.len() as i32;
         for _ in 0..max_tokens {
             let mut candidates =
                 LlamaTokenDataArray::from_iter(ctx.candidates_ith(batch.n_tokens() - 1), false);
             let next_token = candidates.sample_token_greedy();
-            if vocab.is_eog(next_token) {
+            if model.is_eog_token(next_token) {
                 break;
             }
 
-            pending_bytes.extend_from_slice(&vocab.token_to_piece(next_token, false, None));
-            match std::str::from_utf8(&pending_bytes) {
-                Ok(piece) => {
-                    if !piece.is_empty() {
-                        generated_text.push_str(piece);
-                    }
-                    pending_bytes.clear();
-                }
-                Err(error) => {
-                    let valid_len = error.valid_up_to();
-                    if valid_len > 0 {
-                        let piece = std::str::from_utf8(&pending_bytes[..valid_len])?;
-                        generated_text.push_str(piece);
-                        pending_bytes.drain(..valid_len);
-                    }
-                    if error.error_len().is_some() {
-                        let piece = String::from_utf8_lossy(&pending_bytes);
-                        generated_text.push_str(&piece);
-                        pending_bytes.clear();
-                    }
-                }
-            }
+            generated_text.push_str(
+                &model
+                    .token_to_piece(next_token, &mut decoder, false, None)
+                    .context("Failed to decode generated token")?,
+            );
 
             batch.clear();
             batch
@@ -249,10 +233,7 @@ impl LocalLlm {
             ctx.decode(&mut batch)?;
         }
 
-        if !pending_bytes.is_empty() {
-            let piece = String::from_utf8_lossy(&pending_bytes);
-            generated_text.push_str(&piece);
-        }
+        let _ = decoder.decode_to_string(&[], &mut generated_text, true);
 
         Ok(generated_text)
     }
