@@ -128,12 +128,14 @@ jobs:
           "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
 
       - name: Build Vulkan-enabled release
-        run: cargo build --release --locked --features vulkan
+        run: cargo build --release --locked --features vulkan --target-dir D:\t
 
       - name: Package Vulkan OTA archive
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
+          New-Item -ItemType Directory -Force -Path target\release | Out-Null
+          Copy-Item D:\t\release\VeeType.exe target\release\VeeType.exe -Force
           Compress-Archive -Path target\release\VeeType.exe `
             -DestinationPath dist\VeeType-x86_64-pc-windows-msvc.zip -Force
 
