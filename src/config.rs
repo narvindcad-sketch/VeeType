@@ -3,9 +3,9 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AppConfig {
     pub settings: Settings,
     #[serde(default)]
@@ -15,7 +15,7 @@ pub struct AppConfig {
     pub vocabulary: HashMap<String, String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ApiConfig {
     #[serde(default)]
     pub provider: Option<String>,
@@ -43,7 +43,7 @@ impl AppConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Settings {
     pub hotkey: String,
     pub max_tokens: usize,
@@ -61,6 +61,8 @@ pub struct Settings {
     pub hands_free: bool,
     #[serde(default = "default_silence_timeout_ms")]
     pub silence_timeout_ms: u64,
+    #[serde(default)]
+    pub input_device: Option<String>,
 }
 
 fn default_provider() -> String {
@@ -83,7 +85,7 @@ fn default_silence_timeout_ms() -> u64 {
     1500
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Prompts {
     pub default: String,
     pub coding: String,
@@ -103,6 +105,7 @@ impl Default for AppConfig {
                 auto_start: false,
                 hands_free: false,
                 silence_timeout_ms: default_silence_timeout_ms(),
+                input_device: None,
             },
             api: ApiConfig::default(),
             prompts: Prompts {
@@ -159,4 +162,23 @@ pub fn load_config(app_dir: &Path) -> anyhow::Result<AppConfig> {
     };
 
     toml::from_str::<AppConfig>(&raw).with_context(|| format!("Parsing {}", config_path.display()))
+}
+
+pub fn save_config(app_dir: &Path, config: &AppConfig) -> anyhow::Result<()> {
+    let config_path = app_dir.join("config.toml");
+    let contents = toml::to_string_pretty(config).context("Serializing application config")?;
+    fs::write(&config_path, contents).with_context(|| format!("Saving {}", config_path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+
+    #[test]
+    fn serialized_config_does_not_contain_api_credentials() {
+        let contents = toml::to_string(&AppConfig::default()).unwrap();
+
+        assert!(!contents.contains("openai_key"));
+        assert!(!contents.contains("groq_key"));
+    }
 }

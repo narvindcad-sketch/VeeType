@@ -3,3 +3,4 @@
 /Models/
 /vault.json
 /config.toml
+/supabase/.env

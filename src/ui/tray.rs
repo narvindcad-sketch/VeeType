@@ -9,6 +9,7 @@ use crate::config::PromptMode;
 pub struct Tray {
     _icon: TrayIcon,
     vault_menu_id: tray_icon::menu::MenuId,
+    settings_menu_id: tray_icon::menu::MenuId,
     transcribe_menu_id: tray_icon::menu::MenuId,
     quit_menu_id: tray_icon::menu::MenuId,
     auto_prompt_item: CheckMenuItem,
@@ -24,6 +25,8 @@ impl Tray {
         let tray_menu = Menu::new();
         let vault_item = MenuItem::new("View Dictation Vault...", true, None);
         let vault_menu_id = vault_item.id().clone();
+        let settings_item = MenuItem::new("Settings...", true, None);
+        let settings_menu_id = settings_item.id().clone();
         let transcribe_item = MenuItem::new("Transcribe Audio/Video File...", true, None);
         let transcribe_menu_id = transcribe_item.id().clone();
         let prompt_menu = Submenu::new("Active Prompt", true);
@@ -43,13 +46,21 @@ impl Tray {
         let quit_item = MenuItem::new("Quit VeeType", true, None);
         let quit_menu_id = quit_item.id().clone();
         tray_menu
-            .append_items(&[&vault_item, &transcribe_item, &prompt_menu, &quit_item])
+            .append_items(&[
+                &vault_item,
+                &settings_item,
+                &transcribe_item,
+                &prompt_menu,
+                &quit_item,
+            ])
             .context("Could not create the VeeType tray menu")?;
 
-        let icon_rgba = (0..(16 * 16))
-            .flat_map(|_| [0u8, 180u8, 255u8, 255u8])
-            .collect::<Vec<_>>();
-        let icon = Icon::from_rgba(icon_rgba, 16, 16).context("Could not create tray icon")?;
+        let icon_image = image::load_from_memory(include_bytes!("../../icon.ico"))
+            .context("Could not decode the VeeType tray icon")?
+            .into_rgba8();
+        let (width, height) = icon_image.dimensions();
+        let icon = Icon::from_rgba(icon_image.into_raw(), width, height)
+            .context("Could not create VeeType tray icon")?;
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(tray_menu))
             .with_tooltip("VeeType (Local transcription)")
@@ -60,6 +71,7 @@ impl Tray {
         Ok(Self {
             _icon: icon,
             vault_menu_id,
+            settings_menu_id,
             transcribe_menu_id,
             quit_menu_id,
             auto_prompt_item,
@@ -77,6 +89,10 @@ impl Tray {
 
     pub fn is_vault_event(&self, event: &MenuEvent) -> bool {
         event.id == self.vault_menu_id
+    }
+
+    pub fn is_settings_event(&self, event: &MenuEvent) -> bool {
+        event.id == self.settings_menu_id
     }
 
     pub fn is_transcribe_event(&self, event: &MenuEvent) -> bool {
@@ -100,5 +116,17 @@ impl Tray {
         self.professional_prompt_item
             .set_checked(mode == PromptMode::Professional);
         Some(mode)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use image::GenericImageView;
+
+    #[test]
+    fn bundled_tray_icon_is_a_decodable_ico() {
+        let icon = image::load_from_memory(include_bytes!("../../icon.ico"))
+            .expect("bundled tray icon should decode");
+        assert_eq!(icon.dimensions(), (64, 64));
     }
 }

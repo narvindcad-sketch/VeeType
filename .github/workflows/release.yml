@@ -1,0 +1,272 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and publish Windows packages
+    runs-on: windows-2022
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      VEETYPE_SUPABASE_URL: ${{ vars.VEETYPE_SUPABASE_URL }}
+      VEETYPE_SUPABASE_ANON_KEY: ${{ vars.VEETYPE_SUPABASE_ANON_KEY }}
+      VEETYPE_LICENSE_PUBLIC_KEY_B64: ${{ vars.VEETYPE_LICENSE_PUBLIC_KEY_B64 }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate release tag
+        id: version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content Cargo.toml -Raw
+          $match = [regex]::Match($manifest, '(?m)^version\s*=\s*"([^"]+)"')
+          if (-not $match.Success) {
+            throw "Could not read the package version from Cargo.toml"
+          }
+          $packageVersion = $match.Groups[1].Value
+          $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($tagVersion -ne $packageVersion) {
+            throw "Release tag v$tagVersion must match Cargo.toml version $packageVersion"
+          }
+          "version=$packageVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+
+      - name: Validate desktop licensing configuration
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:VEETYPE_SUPABASE_URL) -or
+              [string]::IsNullOrWhiteSpace($env:VEETYPE_SUPABASE_ANON_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:VEETYPE_LICENSE_PUBLIC_KEY_B64)) {
+            throw "Set VEETYPE_SUPABASE_URL, VEETYPE_SUPABASE_ANON_KEY, and VEETYPE_LICENSE_PUBLIC_KEY_B64 as GitHub Actions repository variables before publishing a release."
+          }
+          $supabaseUrl = $null
+          if (-not [Uri]::TryCreate($env:VEETYPE_SUPABASE_URL, [UriKind]::Absolute, [ref]$supabaseUrl) -or
+              $supabaseUrl.Scheme -ne "https") {
+            throw "VEETYPE_SUPABASE_URL must be an HTTPS URL."
+          }
+          try {
+            $publicKey = [Convert]::FromBase64String($env:VEETYPE_LICENSE_PUBLIC_KEY_B64)
+          } catch {
+            throw "VEETYPE_LICENSE_PUBLIC_KEY_B64 must contain valid base64."
+          }
+          if ($publicKey.Length -ne 32) {
+            throw "VEETYPE_LICENSE_PUBLIC_KEY_B64 must decode to a 32-byte Ed25519 public key."
+          }
+
+      - name: Validate Azure Artifact Signing configuration
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          AZURE_ARTIFACT_SIGNING_PROFILE_NAME: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE_NAME }}
+        run: |
+          $requiredSettings = @(
+            "AZURE_CLIENT_ID",
+            "AZURE_TENANT_ID",
+            "AZURE_SUBSCRIPTION_ID",
+            "AZURE_ARTIFACT_SIGNING_ENDPOINT",
+            "AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME",
+            "AZURE_ARTIFACT_SIGNING_PROFILE_NAME"
+          )
+          foreach ($setting in $requiredSettings) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($setting))) {
+              throw "Configure $setting in GitHub Actions secrets or variables before publishing a signed release."
+            }
+          }
+          $endpoint = $null
+          if (-not [Uri]::TryCreate($env:AZURE_ARTIFACT_SIGNING_ENDPOINT, [UriKind]::Absolute, [ref]$endpoint) -or
+              $endpoint.Scheme -ne "https") {
+            throw "AZURE_ARTIFACT_SIGNING_ENDPOINT must be an HTTPS URL."
+          }
+
+      - name: Download pinned model assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path Models | Out-Null
+          curl.exe --fail --location --retry 3 --retry-all-errors `
+            --output Models\ggml-base.bin `
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin?download=true
+          if ($LASTEXITCODE -ne 0) { throw "Whisper model download failed" }
+          curl.exe --fail --location --retry 3 --retry-all-errors `
+            --output Models\qwen2.5-0.5b-instruct-q4_k_m.gguf `
+            https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true
+          if ($LASTEXITCODE -ne 0) { throw "Qwen model download failed" }
+          curl.exe --fail --location --retry 3 --retry-all-errors `
+            --output Models\QWEN-LICENSE.txt `
+            https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/LICENSE?download=true
+          if ($LASTEXITCODE -ne 0) { throw "Qwen model license download failed" }
+          curl.exe --fail --location --retry 3 --retry-all-errors `
+            --output Models\WHISPER-LICENSE.txt `
+            https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/LICENSE
+          if ($LASTEXITCODE -ne 0) { throw "Whisper model license download failed" }
+          if ((Get-Item Models\ggml-base.bin).Length -lt 100MB) { throw "Downloaded Whisper model is incomplete" }
+          if ((Get-Item Models\qwen2.5-0.5b-instruct-q4_k_m.gguf).Length -lt 300MB) { throw "Downloaded Qwen model is incomplete" }
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+      - name: Build CPU release
+        run: cargo build --release --locked
+
+      - name: Authenticate to Azure with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign CPU executable with Azure Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE_NAME }}
+          files: ${{ github.workspace }}\target\release\VeeType.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify CPU executable signature
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature target\release\VeeType.exe
+          if ($signature.Status -ne "Valid") {
+            throw "CPU executable signature is not valid: $($signature.Status) $($signature.StatusMessage)"
+          }
+
+      - name: Package CPU OTA archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path target\release\VeeType.exe `
+            -DestinationPath dist\VeeType-x86_64-pc-windows-msvc.zip -Force
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Compile CPU installer for cloud signing
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler was not installed at $iscc" }
+          & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" /DNoSign setup.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
+
+      - name: Sign installer with Azure Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE_NAME }}
+          files: ${{ github.workspace }}\Output\VeeType_Setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify installer signature and stage release asset
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature Output\VeeType_Setup.exe
+          if ($signature.Status -ne "Valid") {
+            throw "Installer signature is not valid: $($signature.Status) $($signature.StatusMessage)"
+          }
+          Copy-Item Output\VeeType_Setup.exe dist\VeeType_Setup.exe
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.17
+        with:
+          cuda: "12.4.1"
+
+      - name: Build CUDA release
+        run: cargo build --release --locked --features cuda
+
+      - name: Sign CUDA executable with Azure Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE_NAME }}
+          files: ${{ github.workspace }}\target\release\VeeType.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify CUDA executable signature
+        shell: pwsh
+        run: |
+          $signature = Get-AuthenticodeSignature target\release\VeeType.exe
+          if ($signature.Status -ne "Valid") {
+            throw "CUDA executable signature is not valid: $($signature.Status) $($signature.StatusMessage)"
+          }
+
+      - name: Package CUDA distribution
+        shell: pwsh
+        run: |
+          $cudaBin = Join-Path $env:CUDA_PATH "bin"
+          $cudaStage = Join-Path $env:GITHUB_WORKSPACE "dist\cuda"
+          New-Item -ItemType Directory -Force -Path $cudaStage | Out-Null
+          Copy-Item target\release\VeeType.exe $cudaStage\VeeType.exe
+          Copy-Item Models $cudaStage\Models -Recurse
+          foreach ($dll in @("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll")) {
+            $source = Join-Path $cudaBin $dll
+            if (-not (Test-Path $source)) { throw "CUDA runtime dependency is missing: $source" }
+            Copy-Item $source $cudaStage\$dll
+          }
+          Compress-Archive -Path "$cudaStage\*" -DestinationPath dist\VeeType-CUDA.zip -Force
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/VeeType-x86_64-pc-windows-msvc.zip
+            dist/VeeType_Setup.exe
+            dist/VeeType-CUDA.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

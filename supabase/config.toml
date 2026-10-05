@@ -1,0 +1,8 @@
+[functions.issue-license]
+verify_jwt = false
+
+[functions.create-checkout]
+verify_jwt = false
+
+[functions.lemon-squeezy-webhook]
+verify_jwt = false

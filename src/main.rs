@@ -8,32 +8,146 @@ mod utils;
 use anyhow::Context;
 use config::{load_config, PromptMode};
 use cpal::traits::{DeviceTrait, HostTrait};
-use device_query::DeviceState;
-use enigo::{Enigo, KeyboardControllable};
 use std::ffi::OsString;
 use std::fs;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tray_icon::menu::MenuEvent;
 use whisper_rs::{WhisperContext, WhisperContextParameters};
-use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW, HKEY_CURRENT_USER,
-    KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, SetLastError, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
+};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, CreateMutexW, OpenEventW, SetEvent, EVENT_MODIFY_STATE, INFINITE,
+};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetForegroundWindow, GetWindowTextW, MessageBoxW, PeekMessageW,
-    TranslateMessage, MB_ICONERROR, MB_OK, MSG, PM_REMOVE, WM_QUIT,
+    DispatchMessageW, GetForegroundWindow, GetWindowTextW, MessageBoxW,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MB_ICONERROR, MB_OK, MSG,
+    MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WM_HOTKEY, WM_QUIT,
 };
 
 use engine::audio::{
     apply_vocabulary, transcribe_audio, transcribe_media_file, vocabulary_prompt, AudioCapture,
 };
 use engine::cloud::CloudLlm;
-use engine::llm::LocalLlm;
+use engine::license::{Entitlements, LicenseManager};
+use engine::llm::{apply_voice_commands, LocalLlm};
+use engine::{effective_provider, hands_free_enabled};
 use ui::{Overlay, OverlayState};
-use utils::hotkey::{is_hotkey_pressed, is_valid_hotkey};
+use utils::hotkey::{is_hotkey_pressed, is_valid_hotkey, windows_hotkey_parts, HOTKEY_ID};
+
+static HOTKEY_TRIGGERED: AtomicBool = AtomicBool::new(false);
+
+struct SingleInstanceGuard {
+    mutex: HANDLE,
+    wake_event: HANDLE,
+}
+
+impl SingleInstanceGuard {
+    fn acquire() -> anyhow::Result<Option<Self>> {
+        const MUTEX_NAME: &str = "Global\\VeeTypeAppMutex";
+        const EVENT_NAME: &str = "Global\\VeeTypeAppWake";
+
+        let event_name = wide(EVENT_NAME);
+        let wake_event = unsafe { CreateEventW(std::ptr::null(), 0, 0, event_name.as_ptr()) };
+        if wake_event == 0 {
+            anyhow::bail!(
+                "Could not create the VeeType wake event (Windows error {})",
+                unsafe { GetLastError() }
+            );
+        }
+
+        let mutex_name = wide(MUTEX_NAME);
+        unsafe {
+            SetLastError(0);
+        }
+        let mutex = unsafe { CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr()) };
+        if mutex == 0 {
+            let error = unsafe { GetLastError() };
+            unsafe {
+                CloseHandle(wake_event);
+            }
+            anyhow::bail!(
+                "Could not create the VeeType single-instance mutex (Windows error {error})"
+            );
+        }
+
+        if unsafe { GetLastError() } == windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS {
+            unsafe {
+                CloseHandle(mutex);
+            }
+            let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr()) };
+            if event == 0 {
+                let error = unsafe { GetLastError() };
+                unsafe {
+                    CloseHandle(wake_event);
+                }
+                anyhow::bail!(
+                    "VeeType is already running, but its wake event could not be opened (Windows error {error})"
+                );
+            }
+            let signaled = unsafe { SetEvent(event) } != 0;
+            let error = unsafe { GetLastError() };
+            unsafe {
+                CloseHandle(event);
+                CloseHandle(wake_event);
+            }
+            if !signaled {
+                anyhow::bail!(
+                    "Could not notify the running VeeType instance (Windows error {error})"
+                );
+            }
+            return Ok(None);
+        }
+
+        Ok(Some(Self { mutex, wake_event }))
+    }
+}
+
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.wake_event);
+            CloseHandle(self.mutex);
+        }
+    }
+}
+
+struct RegisteredHotkey;
+
+impl RegisteredHotkey {
+    fn register(hotkey: &str) -> anyhow::Result<Self> {
+        let (modifiers, key) = windows_hotkey_parts(hotkey)?;
+        if unsafe { RegisterHotKey(0, HOTKEY_ID, modifiers, key) } == 0 {
+            anyhow::bail!(
+                "Could not register the global hotkey {hotkey:?} (Windows error {})",
+                unsafe { GetLastError() }
+            );
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for RegisteredHotkey {
+    fn drop(&mut self) {
+        if unsafe { UnregisterHotKey(0, HOTKEY_ID) } == 0 {
+            tracing::warn!(
+                error = unsafe { GetLastError() },
+                "Could not unregister the global hotkey"
+            );
+        }
+    }
+}
 
 fn application_directory() -> anyhow::Result<PathBuf> {
     let executable = std::env::current_exe()?;
@@ -49,89 +163,6 @@ fn application_directory() -> anyhow::Result<PathBuf> {
         .unwrap_or(executable_dir))
 }
 
-fn configure_auto_start(enabled: bool) -> anyhow::Result<()> {
-    const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-    const VALUE_NAME: &str = "VeeType";
-    const LEGACY_VALUE_NAME: &str = "VoiceDictation";
-
-    let key_path = wide(RUN_KEY);
-    let value_name = wide(VALUE_NAME);
-    let legacy_value_name = wide(LEGACY_VALUE_NAME);
-    let command = if enabled {
-        let executable = std::env::current_exe()?;
-        Some(wide(&format!("\"{}\"", executable.display())))
-    } else {
-        None
-    };
-    let mut key = 0;
-    let status = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            key_path.as_ptr(),
-            0,
-            std::ptr::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_SET_VALUE,
-            std::ptr::null(),
-            &mut key,
-            std::ptr::null_mut(),
-        )
-    };
-    if status != 0 {
-        anyhow::bail!("Could not open the Windows startup registry key (error {status})");
-    }
-
-    let result = if enabled {
-        let command = command.as_ref().expect("command exists when enabled");
-        let byte_len = u32::try_from(command.len() * std::mem::size_of::<u16>())?;
-        let status = unsafe {
-            RegSetValueExW(
-                key,
-                value_name.as_ptr(),
-                0,
-                REG_SZ,
-                command.as_ptr().cast(),
-                byte_len,
-            )
-        };
-        if status != 0 {
-            Err(anyhow::anyhow!(
-                "Could not register Windows auto-start (error {status})"
-            ))
-        } else {
-            let legacy_status = unsafe { RegDeleteValueW(key, legacy_value_name.as_ptr()) };
-            if legacy_status == 0 || legacy_status == 2 {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!(
-                    "Could not remove the legacy Windows auto-start entry (error {legacy_status})"
-                ))
-            }
-        }
-    } else {
-        let status = unsafe { RegDeleteValueW(key, value_name.as_ptr()) };
-        if status == 0 || status == 2 {
-            let legacy_status = unsafe { RegDeleteValueW(key, legacy_value_name.as_ptr()) };
-            if legacy_status == 0 || legacy_status == 2 {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!(
-                    "Could not remove the legacy Windows auto-start entry (error {legacy_status})"
-                ))
-            }
-        } else {
-            Err(anyhow::anyhow!(
-                "Could not remove the Windows auto-start entry (error {status})"
-            ))
-        }
-    };
-
-    unsafe {
-        RegCloseKey(key);
-    }
-    result
-}
-
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -143,11 +174,87 @@ fn pump_windows_messages() -> bool {
             if message.message == WM_QUIT {
                 return true;
             }
+            if message.message == WM_HOTKEY && message.wParam == HOTKEY_ID as usize {
+                HOTKEY_TRIGGERED.store(true, Ordering::Release);
+            }
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
     }
     false
+}
+
+fn take_hotkey_trigger() -> bool {
+    HOTKEY_TRIGGERED.swap(false, Ordering::AcqRel)
+}
+
+fn wait_for_windows_activity(wake_event: HANDLE) -> anyhow::Result<bool> {
+    let result = unsafe {
+        MsgWaitForMultipleObjectsEx(1, &wake_event, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+    };
+    if result == WAIT_OBJECT_0 {
+        return Ok(true);
+    }
+    if result == WAIT_OBJECT_0 + 1 {
+        return Ok(false);
+    }
+    if result == WAIT_FAILED {
+        anyhow::bail!(
+            "Waiting for Windows messages failed (Windows error {})",
+            unsafe { GetLastError() }
+        );
+    }
+    anyhow::bail!("Windows returned an unexpected message-wait result: {result}");
+}
+
+fn open_settings_window() -> anyhow::Result<()> {
+    let executable = std::env::current_exe()?;
+    Command::new(executable).arg("--settings").spawn()?;
+    Ok(())
+}
+
+fn send_unicode_text(text: &str) -> anyhow::Result<()> {
+    const MAX_UNITS_PER_BATCH: usize = 5_000;
+
+    for utf16_batch in text
+        .encode_utf16()
+        .collect::<Vec<_>>()
+        .chunks(MAX_UNITS_PER_BATCH)
+    {
+        let mut inputs = Vec::with_capacity(utf16_batch.len() * 2);
+        for &unit in utf16_batch {
+            for flags in [KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP] {
+                inputs.push(INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: 0,
+                            wScan: unit,
+                            dwFlags: flags,
+                            time: 0,
+                            dwExtraInfo: 0,
+                        },
+                    },
+                });
+            }
+        }
+
+        let expected = inputs.len() as u32;
+        let sent = unsafe {
+            SendInput(
+                expected,
+                inputs.as_ptr(),
+                std::mem::size_of::<INPUT>() as i32,
+            )
+        };
+        if sent != expected {
+            anyhow::bail!(
+                "Windows accepted {sent} of {expected} Unicode keyboard events (error {})",
+                unsafe { GetLastError() }
+            );
+        }
+    }
+    Ok(())
 }
 
 fn get_active_window_title() -> String {
@@ -185,7 +292,7 @@ fn initialize_logging() -> anyhow::Result<tracing_appender::non_blocking::Worker
     fs::create_dir_all(&log_dir)
         .with_context(|| format!("Creating log directory {}", log_dir.display()))?;
 
-    let appender = tracing_appender::rolling::daily(log_dir, "app.log");
+    let appender = tracing_appender::rolling::daily(log_dir, "veetype.log");
     let (writer, guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::fmt()
         .with_writer(writer)
@@ -196,6 +303,27 @@ fn initialize_logging() -> anyhow::Result<tracing_appender::non_blocking::Worker
 }
 
 fn main() {
+    let is_auxiliary_window =
+        std::env::args().any(|argument| argument == "--settings" || argument == "--vault");
+    let single_instance = if is_auxiliary_window {
+        None
+    } else {
+        match SingleInstanceGuard::acquire() {
+            Ok(Some(guard)) => Some(guard),
+            Ok(None) => return,
+            Err(error) => {
+                show_error_dialog(
+                    "VeeType single-instance check failed",
+                    &format!("{error:#}"),
+                );
+                return;
+            }
+        }
+    };
+
+    let priority_set =
+        unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) != 0 };
+
     let _log_guard = match initialize_logging() {
         Ok(guard) => guard,
         Err(error) => {
@@ -203,6 +331,15 @@ fn main() {
             return;
         }
     };
+
+    if priority_set {
+        tracing::info!("Process priority set to below normal");
+    } else {
+        tracing::warn!(
+            error = %std::io::Error::last_os_error(),
+            "Could not lower process priority; continuing with default priority"
+        );
+    }
 
     std::panic::set_hook(Box::new(|panic_info| {
         tracing::error!(panic = %panic_info, "Application panicked");
@@ -213,8 +350,15 @@ fn main() {
         application_directory()
             .map(|app_dir| ui::vault::run(app_dir.join("vault.json")))
             .and_then(|result| result)
+    } else if std::env::args().any(|argument| argument == "--settings") {
+        application_directory().and_then(ui::settings::run)
     } else {
-        run_app()
+        match single_instance.as_ref() {
+            Some(guard) => run_app(guard.wake_event),
+            None => Err(anyhow::anyhow!(
+                "The main application instance guard was not initialized"
+            )),
+        }
     };
 
     if let Err(error) = result {
@@ -223,16 +367,25 @@ fn main() {
     }
 }
 
-fn run_app() -> anyhow::Result<()> {
+fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
     let app_dir = application_directory()?;
     let config = load_config(&app_dir)?;
+    let entitlements = match LicenseManager::cached_entitlements() {
+        Ok(Some(entitlements)) => entitlements,
+        Ok(None) => Entitlements::default(),
+        Err(error) => {
+            tracing::warn!(error = %error, "Cached Pro license is unavailable; using free features");
+            Entitlements::default()
+        }
+    };
     if !is_valid_hotkey(config.settings.hotkey.trim()) {
         anyhow::bail!(
             "Unsupported settings.hotkey value: {:?}",
             config.settings.hotkey
         );
     }
-    configure_auto_start(config.settings.auto_start)?;
+    engine::startup::set_enabled(config.settings.auto_start)?;
+    let _registered_hotkey = RegisteredHotkey::register(&config.settings.hotkey)?;
     if config.settings.max_tokens == 0 {
         anyhow::bail!("settings.max_tokens must be greater than zero");
     }
@@ -255,15 +408,27 @@ fn run_app() -> anyhow::Result<()> {
         anyhow::bail!("settings.silence_timeout_ms must not exceed 60000");
     }
     let max_new_tokens = config.settings.max_tokens;
+    let selected_provider = config.provider();
+    let effective_provider = effective_provider(selected_provider, &entitlements);
+    if effective_provider != selected_provider {
+        tracing::warn!(
+            provider = selected_provider,
+            "Cloud provider requires an active Pro license; using local polishing"
+        );
+    }
+    let hands_free_enabled = hands_free_enabled(config.settings.hands_free, &entitlements);
+    if config.settings.hands_free && !hands_free_enabled {
+        tracing::warn!("Hands-free mode requires an active Pro license; using push-to-talk");
+    }
     tracing::info!(
         hotkey = %config.settings.hotkey,
         max_tokens = max_new_tokens,
-        provider = %config.provider(),
+        provider = effective_provider,
         "Configuration loaded"
     );
 
-    let cloud_llm = if config.provider().eq_ignore_ascii_case("groq")
-        || config.provider().eq_ignore_ascii_case("openai")
+    let cloud_llm = if effective_provider.eq_ignore_ascii_case("groq")
+        || effective_provider.eq_ignore_ascii_case("openai")
     {
         Some(CloudLlm::from_config(&config)?)
     } else {
@@ -275,33 +440,55 @@ fn run_app() -> anyhow::Result<()> {
 
     tracing::info!("Dictation engine starting");
 
-    let mut local_llm = if config.provider().eq_ignore_ascii_case("local") {
-        Some(LocalLlm::load(&app_dir)?)
+    let mut local_llm = if effective_provider.eq_ignore_ascii_case("local") {
+        Some(LocalLlm::load(&app_dir, entitlements.large_models)?)
     } else {
-        tracing::info!(provider = %config.provider(), "Using cloud text polishing; Whisper remains local");
+        tracing::info!(
+            provider = effective_provider,
+            "Using cloud text polishing; Whisper remains local"
+        );
         None
     };
 
     let ctx_params = WhisperContextParameters::default();
     let whisper_model_path = app_dir.join("Models/ggml-base.bin");
-    let whisper_ctx = WhisperContext::new_with_params(&whisper_model_path, ctx_params)
-        .expect("Failed to load Whisper.");
-    let mut whisper_state = whisper_ctx.create_state().expect("Failed to create state");
+    let whisper_ctx =
+        WhisperContext::new_with_params(&whisper_model_path, ctx_params).map_err(|error| {
+            anyhow::anyhow!(
+                "Failed to load Whisper model {}: {error}",
+                whisper_model_path.display()
+            )
+        })?;
+    let mut whisper_state = whisper_ctx
+        .create_state()
+        .context("Failed to initialize Whisper transcription state")?;
 
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .expect("No microphone detected.");
+    let device = match config
+        .settings
+        .input_device
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+    {
+        Some(selected_name) => host
+            .input_devices()?
+            .find(|device| device.name().is_ok_and(|name| name == selected_name))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Configured microphone device {:?} is not available; select another device in VeeType Settings",
+                    selected_name
+                )
+            })?,
+        None => host
+            .default_input_device()
+            .ok_or_else(|| anyhow::anyhow!("No microphone input device is available"))?,
+    };
     let supported_config = device.default_input_config()?;
     let sample_format = supported_config.sample_format();
     let stream_config: cpal::StreamConfig = supported_config.into();
     let native_sample_rate = stream_config.sample_rate.0;
     let channels = stream_config.channels as usize;
 
-    let device_state = DeviceState::new();
-    let mut enigo = Enigo::new();
-
-    let silence_threshold = 0.01_f32;
     let silence_limit = (16_000_u64 * config.settings.silence_timeout_ms / 1_000) as usize;
     let whisper_prompt = vocabulary_prompt(&config.vocabulary);
     let mut prompt_mode = PromptMode::Auto;
@@ -327,6 +514,18 @@ fn run_app() -> anyhow::Result<()> {
                         Err(error) => {
                             show_error_dialog("Could not open Dictation Vault", &format!("{error}"))
                         }
+                    }
+                    continue;
+                }
+                if tray.is_settings_event(&event) {
+                    match std::env::current_exe()
+                        .and_then(|executable| Command::new(executable).arg("--settings").spawn())
+                    {
+                        Ok(_) => {}
+                        Err(error) => show_error_dialog(
+                            "Could not open VeeType Settings",
+                            &format!("{error}"),
+                        ),
                     }
                     continue;
                 }
@@ -365,11 +564,16 @@ fn run_app() -> anyhow::Result<()> {
                 }
             }
 
-            if is_hotkey_pressed(&config.settings.hotkey, &device_state) {
+            if take_hotkey_trigger() {
                 overlay.show(OverlayState::Listening)?;
                 break;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            if wait_for_windows_activity(wake_event)? {
+                if let Err(error) = open_settings_window() {
+                    tracing::error!(error = %error, "Could not open Settings for the running VeeType instance");
+                    show_error_dialog("Could not open VeeType Settings", &format!("{error:#}"));
+                }
+            }
         }
         if quit_requested {
             break;
@@ -385,12 +589,13 @@ fn run_app() -> anyhow::Result<()> {
         let listening_started = Instant::now();
         tracing::info!("Audio capture started");
 
-        if config.settings.hands_free {
-            while is_hotkey_pressed(&config.settings.hotkey, &device_state) {
+        if hands_free_enabled {
+            while is_hotkey_pressed(&config.settings.hotkey) {
                 if pump_windows_messages() {
                     quit_requested = true;
                     break;
                 }
+                let _ = take_hotkey_trigger();
                 std::thread::sleep(Duration::from_millis(30));
             }
         }
@@ -405,14 +610,16 @@ fn run_app() -> anyhow::Result<()> {
                 quit_requested = true;
                 break;
             }
+            let _ = take_hotkey_trigger();
 
-            let pressed = is_hotkey_pressed(&config.settings.hotkey, &device_state);
-            if config.settings.hands_free && pressed {
-                while is_hotkey_pressed(&config.settings.hotkey, &device_state) {
+            let pressed = is_hotkey_pressed(&config.settings.hotkey);
+            if hands_free_enabled && pressed {
+                while is_hotkey_pressed(&config.settings.hotkey) {
                     if pump_windows_messages() {
                         quit_requested = true;
                         break;
                     }
+                    let _ = take_hotkey_trigger();
                     std::thread::sleep(Duration::from_millis(30));
                 }
                 if quit_requested {
@@ -421,18 +628,18 @@ fn run_app() -> anyhow::Result<()> {
                 overlay.hide()?;
                 break;
             }
-            if !config.settings.hands_free && !pressed {
+            if !hands_free_enabled && !pressed {
                 overlay.hide()?;
                 break;
             }
 
-            let (average_energy, chunk_count) = capture.drain_samples(silence_threshold);
+            let (average_energy, frame_count) = capture.drain_samples()?;
 
-            if chunk_count > 0 {
+            if frame_count > 0 {
                 overlay.set_volume((average_energy / 0.08).clamp(0.0, 1.0))?;
             }
 
-            if config.settings.hands_free && capture.silence_limit_reached(silence_limit) {
+            if hands_free_enabled && capture.silence_limit_reached(silence_limit) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -443,7 +650,7 @@ fn run_app() -> anyhow::Result<()> {
             break;
         }
 
-        let audio_samples = capture.finish();
+        let audio_samples = capture.finish()?;
 
         tracing::info!(
             elapsed_ms = listening_started.elapsed().as_millis(),
@@ -455,6 +662,7 @@ fn run_app() -> anyhow::Result<()> {
             continue;
         }
 
+        overlay.show(OverlayState::Processing)?;
         let transcription_started = Instant::now();
         let transcription_result = transcribe_audio(
             &mut whisper_state,
@@ -480,13 +688,11 @@ fn run_app() -> anyhow::Result<()> {
             let normalized_raw = apply_vocabulary(trimmed_raw, &config.vocabulary);
             let polishing_started = Instant::now();
             let mut generated_text = if let Some(cloud_llm) = cloud_llm.as_ref() {
-                let polished = cloud_llm.polish(
+                cloud_llm.polish(
                     config.settings.max_tokens,
                     system_instruction,
                     &normalized_raw,
-                )?;
-                enigo.key_sequence(&polished);
-                polished
+                )?
             } else {
                 let local_llm = local_llm
                     .as_mut()
@@ -496,26 +702,29 @@ fn run_app() -> anyhow::Result<()> {
                     config.settings.max_tokens,
                     system_instruction,
                     &normalized_raw,
-                    &mut enigo,
                 )?
             };
             tracing::info!(
-                provider = %config.provider(),
+                provider = effective_provider,
                 elapsed_ms = polishing_started.elapsed().as_millis(),
                 "Text polishing completed"
             );
 
             if generated_text.trim().is_empty() {
-                enigo.key_sequence(trimmed_raw);
                 generated_text = trimmed_raw.to_string();
             }
+            generated_text = apply_voice_commands(&generated_text);
 
-            if generated_text
-                .chars()
-                .last()
-                .map_or(true, |ch| !ch.is_whitespace())
-            {
-                enigo.key_sequence(" ");
+            if !generated_text.is_empty() {
+                let mut insertion_text = generated_text.clone();
+                if insertion_text
+                    .chars()
+                    .last()
+                    .map_or(true, |ch| !ch.is_whitespace())
+                {
+                    insertion_text.push(' ');
+                }
+                send_unicode_text(&insertion_text)?;
             }
             if let Err(error) =
                 ui::vault::save_entry(&app_dir.join("vault.json"), trimmed_raw, &generated_text)
@@ -527,6 +736,7 @@ fn run_app() -> anyhow::Result<()> {
             }
             tracing::info!("Polished dictation inserted and saved");
         }
+        overlay.hide()?;
     }
     Ok(())
 }

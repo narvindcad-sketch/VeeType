@@ -1,6 +1,7 @@
 //! Local Whisper transcription and audio/video file processing.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -9,12 +10,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use ringbuf::{HeapConsumer, HeapRb};
+use webrtc_vad::{SampleRate, Vad, VadMode};
 use whisper_rs::{FullParams, SamplingStrategy};
 
+const VAD_FRAME_SAMPLES: usize = 480;
+const VAD_HANGOVER_FRAMES: usize = 15;
+const VAD_PRE_ROLL_FRAMES: usize = 10;
+
 pub struct AudioCapture {
-    stream: cpal::Stream,
+    stream: Option<cpal::Stream>,
     consumer: HeapConsumer<f32>,
     samples: Vec<f32>,
+    vad: Vad,
+    pending_frame: Vec<f32>,
+    pre_roll: VecDeque<Vec<f32>>,
+    voice_hangover_frames: usize,
     silence_samples: usize,
     speech_detected: bool,
 }
@@ -57,47 +67,91 @@ impl AudioCapture {
             .play()
             .context("Could not start microphone capture")?;
         Ok(Self {
-            stream,
+            stream: Some(stream),
             consumer,
             samples: Vec::new(),
+            vad: Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive),
+            pending_frame: Vec::with_capacity(VAD_FRAME_SAMPLES),
+            pre_roll: VecDeque::with_capacity(VAD_PRE_ROLL_FRAMES),
+            voice_hangover_frames: 0,
             silence_samples: 0,
             speech_detected: false,
         })
     }
 
-    pub fn drain_samples(&mut self, silence_threshold: f32) -> (f32, usize) {
-        let mut energy_sum = 0.0_f32;
-        let mut chunk_count = 0;
+    fn process_pending_samples(&mut self) -> anyhow::Result<(f32, usize)> {
+        let mut voiced_energy = 0.0_f32;
+        let mut voiced_frames = 0;
+        let mut processed_frames = 0;
+
         while let Some(sample) = self.consumer.pop() {
-            self.samples.push(sample);
-            energy_sum += sample.abs();
-            chunk_count += 1;
+            self.pending_frame.push(sample);
+            if self.pending_frame.len() != VAD_FRAME_SAMPLES {
+                continue;
+            }
+
+            let frame = std::mem::replace(
+                &mut self.pending_frame,
+                Vec::with_capacity(VAD_FRAME_SAMPLES),
+            );
+            let pcm_frame: Vec<i16> = frame
+                .iter()
+                .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                .collect();
+            let is_voice = self
+                .vad
+                .is_voice_segment(&pcm_frame)
+                .map_err(|()| anyhow::anyhow!("WebRTC VAD rejected a 30 ms audio frame"))?;
+            let frame_energy = (frame.iter().map(|sample| sample * sample).sum::<f32>()
+                / VAD_FRAME_SAMPLES as f32)
+                .sqrt();
+            processed_frames += 1;
+
+            if is_voice {
+                self.speech_detected = true;
+                self.voice_hangover_frames = VAD_HANGOVER_FRAMES;
+                self.silence_samples = 0;
+                self.samples.extend(self.pre_roll.drain(..).flatten());
+                self.samples.extend_from_slice(&frame);
+                voiced_energy += frame_energy;
+                voiced_frames += 1;
+            } else if self.voice_hangover_frames > 0 {
+                self.voice_hangover_frames -= 1;
+                self.silence_samples += VAD_FRAME_SAMPLES;
+                self.samples.extend_from_slice(&frame);
+                voiced_energy += frame_energy;
+                voiced_frames += 1;
+            } else {
+                if self.speech_detected {
+                    self.silence_samples += VAD_FRAME_SAMPLES;
+                }
+                if self.pre_roll.len() == VAD_PRE_ROLL_FRAMES {
+                    self.pre_roll.pop_front();
+                }
+                self.pre_roll.push_back(frame);
+            }
         }
 
-        if chunk_count == 0 {
-            return (0.0, 0);
-        }
+        let average_energy = if voiced_frames == 0 {
+            0.0
+        } else {
+            voiced_energy / voiced_frames as f32
+        };
+        Ok((average_energy, processed_frames))
+    }
 
-        let average_energy = energy_sum / chunk_count as f32;
-        if average_energy >= silence_threshold {
-            self.speech_detected = true;
-            self.silence_samples = 0;
-        } else if self.speech_detected {
-            self.silence_samples += chunk_count;
-        }
-        (average_energy, chunk_count)
+    pub fn drain_samples(&mut self) -> anyhow::Result<(f32, usize)> {
+        self.process_pending_samples()
     }
 
     pub fn silence_limit_reached(&self, silence_limit: usize) -> bool {
         self.speech_detected && self.silence_samples >= silence_limit
     }
 
-    pub fn finish(mut self) -> Vec<f32> {
-        drop(self.stream);
-        while let Some(sample) = self.consumer.pop() {
-            self.samples.push(sample);
-        }
-        self.samples
+    pub fn finish(mut self) -> anyhow::Result<Vec<f32>> {
+        drop(self.stream.take());
+        self.process_pending_samples()?;
+        Ok(self.samples)
     }
 }
 
@@ -173,6 +227,7 @@ pub fn transcribe_audio(
     initial_prompt: &str,
 ) -> anyhow::Result<String> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_n_threads(crate::engine::worker_thread_count() as i32);
     let language = (!language.eq_ignore_ascii_case("auto")).then_some(language);
     params.set_language(language);
     params.set_translate(translate_to_english);

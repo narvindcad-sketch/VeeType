@@ -10,11 +10,10 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context};
 use windows_sys::Win32::Foundation::{GetLastError, HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse,
-    EndPaint, FillRect, GetMonitorInfoW, GetStockObject, InvalidateRect, MonitorFromWindow,
-    RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, UpdateWindow, DT_LEFT,
-    DT_SINGLELINE, DT_VCENTER, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_BRUSH, PS_SOLID,
-    TRANSPARENT,
+    BeginPaint, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, EndPaint,
+    FillRect, GetMonitorInfoW, GetStockObject, InvalidateRect, MonitorFromWindow, RoundRect,
+    SelectObject, SetBkMode, SetTextColor, SetWindowRgn, UpdateWindow, DT_LEFT, DT_SINGLELINE,
+    DT_VCENTER, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_PEN, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -33,6 +32,7 @@ const VISIBLE_ALPHA: f32 = 238.0;
 pub enum OverlayState {
     Idle,
     Listening,
+    Processing,
 }
 
 impl OverlayState {
@@ -40,13 +40,15 @@ impl OverlayState {
         match self {
             Self::Idle => "Ready  |  Right Alt",
             Self::Listening => "Listening...",
+            Self::Processing => "Polishing text...",
         }
     }
 
     fn accent(self) -> u32 {
         match self {
-            Self::Idle => rgb(120, 145, 165),
-            Self::Listening => rgb(255, 76, 91),
+            Self::Idle => rgb(148, 163, 184),
+            Self::Listening => rgb(99, 102, 241),
+            Self::Processing => rgb(139, 92, 246),
         }
     }
 }
@@ -371,82 +373,97 @@ unsafe fn paint_window(hwnd: HWND) {
         bottom: WINDOW_HEIGHT,
     };
 
+    let previous_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
     let visual = VISUAL_STATE.with(|state| *state.borrow());
-    let accent = visual.state.accent();
-
-    let background = CreateSolidBrush(rgb(18, 23, 33));
+    let background = CreateSolidBrush(rgb(14, 14, 18));
     if background != 0 {
         FillRect(hdc, &bounds, background);
     }
 
-    let pen = CreatePen(PS_SOLID, 1, rgb(79, 93, 112));
-    if pen != 0 {
-        let previous_pen = SelectObject(hdc, pen);
-        let previous_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, 1, 1, WINDOW_WIDTH - 1, WINDOW_HEIGHT - 1, 30, 30);
+    let outer_glow = CreateSolidBrush(rgb(20, 19, 34));
+    if outer_glow != 0 {
+        let previous_brush = SelectObject(hdc, outer_glow);
+        Ellipse(hdc, 18, 4, 86, 54);
         SelectObject(hdc, previous_brush);
-        SelectObject(hdc, previous_pen);
-        DeleteObject(pen);
+        DeleteObject(outer_glow);
+    }
+    let inner_glow = CreateSolidBrush(rgb(25, 23, 45));
+    if inner_glow != 0 {
+        let previous_brush = SelectObject(hdc, inner_glow);
+        Ellipse(hdc, 25, 8, 79, 50);
+        SelectObject(hdc, previous_brush);
+        DeleteObject(inner_glow);
     }
 
-    let indicator_brush = CreateSolidBrush(accent);
-    if indicator_brush != 0 {
-        let previous_brush = SelectObject(hdc, indicator_brush);
-        match visual.state {
-            OverlayState::Listening => {
-                let radius = 6.0 + visual.volume * 8.0 + visual.phase.sin().abs() * 1.5;
-                let center_x = 30.0;
-                let center_y = 29.0;
-                Ellipse(
-                    hdc,
-                    (center_x - radius - 5.0) as i32,
-                    (center_y - radius - 5.0) as i32,
-                    (center_x + radius + 5.0) as i32,
-                    (center_y + radius + 5.0) as i32,
-                );
-                let radius = radius.min(13.0);
-                Ellipse(
-                    hdc,
-                    (center_x - radius) as i32,
-                    (center_y - radius) as i32,
-                    (center_x + radius) as i32,
-                    (center_y + radius) as i32,
-                );
-
-                let bar_brush = CreateSolidBrush(rgb(255, 142, 151));
-                if bar_brush != 0 {
-                    let previous = SelectObject(hdc, bar_brush);
-                    for index in 0..4 {
-                        let wave = (visual.phase + index as f32 * 0.8).sin().abs();
-                        let height = 4 + (visual.volume * 12.0 + wave * 5.0) as i32;
-                        let x = 62 + index * 5;
-                        let bar = RECT {
-                            left: x,
-                            top: 29 - height / 2,
-                            right: x + 3,
-                            bottom: 29 + height / 2,
-                        };
-                        FillRect(hdc, &bar, bar_brush);
-                    }
-                    SelectObject(hdc, previous);
-                    DeleteObject(bar_brush);
+    match visual.state {
+        OverlayState::Listening => {
+            let pulse = visual.phase.sin().abs() * 0.2;
+            let dynamic_volume = (visual.volume * 15.0).max(pulse);
+            let base_heights = [8.0_f32, 16.0, 10.0, 18.0];
+            for (index, base_height) in base_heights.iter().enumerate() {
+                let height = (base_height * (0.5 + dynamic_volume)).clamp(4.0, 24.0) as i32;
+                let x = 34 + index as i32 * 9;
+                let color = if index % 2 == 0 {
+                    rgb(99, 102, 241)
+                } else {
+                    rgb(139, 92, 246)
+                };
+                let brush = CreateSolidBrush(color);
+                if brush != 0 {
+                    let previous_brush = SelectObject(hdc, brush);
+                    RoundRect(hdc, x, 29 - height / 2, x + 4, 29 + height / 2, 4, 4);
+                    SelectObject(hdc, previous_brush);
+                    DeleteObject(brush);
                 }
             }
-            OverlayState::Idle => {
-                Ellipse(hdc, 23, 22, 37, 36);
+        }
+        OverlayState::Processing => {
+            let pulse = (visual.phase.sin() + 1.0) * 0.5;
+            let radius = 4.0 + pulse * 3.0;
+            let glow = CreateSolidBrush(rgb(42, 34, 76));
+            if glow != 0 {
+                let previous_brush = SelectObject(hdc, glow);
+                Ellipse(
+                    hdc,
+                    51 - (radius + 7.0) as i32,
+                    29 - (radius + 7.0) as i32,
+                    51 + (radius + 7.0) as i32,
+                    29 + (radius + 7.0) as i32,
+                );
+                SelectObject(hdc, previous_brush);
+                DeleteObject(glow);
+            }
+            let brush = CreateSolidBrush(rgb(139, 92, 246));
+            if brush != 0 {
+                let previous_brush = SelectObject(hdc, brush);
+                Ellipse(
+                    hdc,
+                    51 - radius as i32,
+                    29 - radius as i32,
+                    51 + radius as i32,
+                    29 + radius as i32,
+                );
+                SelectObject(hdc, previous_brush);
+                DeleteObject(brush);
             }
         }
-        SelectObject(hdc, previous_brush);
-        DeleteObject(indicator_brush);
+        OverlayState::Idle => {
+            let brush = CreateSolidBrush(visual.state.accent());
+            if brush != 0 {
+                let previous_brush = SelectObject(hdc, brush);
+                Ellipse(hdc, 23, 22, 37, 36);
+                SelectObject(hdc, previous_brush);
+                DeleteObject(brush);
+            }
+        }
     }
-
     SetBkMode(hdc, TRANSPARENT as i32);
-    SetTextColor(hdc, rgb(238, 243, 250));
+    SetTextColor(hdc, rgb(244, 244, 245));
     let title = wide(visual.state.label());
     let mut text_bounds = RECT {
-        left: 88,
+        left: 94,
         top: 0,
-        right: WINDOW_WIDTH - 18,
+        right: WINDOW_WIDTH - 20,
         bottom: WINDOW_HEIGHT,
     };
     DrawTextW(
@@ -456,6 +473,7 @@ unsafe fn paint_window(hwnd: HWND) {
         &mut text_bounds,
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
+    SelectObject(hdc, previous_pen);
     EndPaint(hwnd, &paint);
     if background != 0 {
         DeleteObject(background);

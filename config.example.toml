@@ -10,7 +10,8 @@ hands_free = false
 silence_timeout_ms = 1500
 
 # Optional provider/model override. Supported providers: "local", "groq", "openai".
-# Cloud API keys belong in the GROQ_API_KEY or OPENAI_API_KEY environment variable.
+# Cloud API keys are stored in Windows Credential Manager through VeeType Settings.
+# GROQ_API_KEY and OPENAI_API_KEY environment variables are supported as a fallback.
 # [api]
 # provider = "groq"
 # model = "llama-3.3-70b-versatile"

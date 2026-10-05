@@ -1,5 +1,7 @@
 #define AppName "VeeType"
+#ifndef AppVersion
 #define AppVersion "0.1.0"
+#endif
 #define AppPublisher "VeeType"
 
 [Setup]
@@ -10,6 +12,11 @@ AppPublisher={#AppPublisher}
 DefaultDirName={localappdata}\Programs\VeeType
 DefaultGroupName={#AppName}
 UninstallDisplayName={#AppName}
+SetupIconFile=icon.ico
+UninstallDisplayIcon={app}\icon.ico
+#ifndef NoSign
+SignTool=MsSign
+#endif
 OutputDir=Output
 OutputBaseFilename=VeeType_Setup
 Compression=lzma2
@@ -24,12 +31,13 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "target\release\VeeType.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "config.example.toml"; DestDir: "{app}"; DestName: "config.toml"; Flags: onlyifdoesntexist
 Source: "Models\*"; DestDir: "{app}\Models"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\VeeType.exe"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\VeeType.exe"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\VeeType.exe"; IconFilename: "{app}\icon.ico"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\VeeType.exe"; Tasks: desktopicon; IconFilename: "{app}\icon.ico"
 
 [Run]
 Filename: "{app}\VeeType.exe"; Description: "Launch {#AppName} now"; Flags: nowait postinstall skipifsilent

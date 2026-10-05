@@ -2,6 +2,7 @@ use anyhow::Context;
 use reqwest::blocking::Client;
 
 use crate::config::AppConfig;
+use crate::engine::keychain::KeyVault;
 
 pub struct CloudLlm {
     client: Client,
@@ -34,9 +35,14 @@ impl CloudLlm {
                     config.provider()
                 );
             };
-        let api_key = std::env::var(key_name).with_context(|| {
-            format!("{key_name} must be set when using the {provider} provider")
-        })?;
+        let api_key = match KeyVault::get_key(key_name)? {
+            Some(key) => key,
+            None => std::env::var(key_name).with_context(|| {
+                format!(
+                    "{key_name} must be configured in Windows Credential Manager or the environment"
+                )
+            })?,
+        };
         if api_key.trim().is_empty() {
             anyhow::bail!("{key_name} is empty");
         }
@@ -118,6 +124,7 @@ mod tests {
                 auto_start: false,
                 hands_free: false,
                 silence_timeout_ms: 1500,
+                input_device: None,
             },
             api: crate::config::ApiConfig {
                 provider: Some("openai".into()),

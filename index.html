@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en" class="theme-night">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#09090b">
+    <meta name="theme-color" content="#000000">
     <meta name="description" content="VeeType turns speech into polished text on Windows, with local transcription and optional cloud text polishing.">
     <title>VeeType — Speak naturally. Get polished text.</title>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -13,248 +13,454 @@
             theme: {
                 extend: {
                     colors: {
-                        darkbg: '#09090b',
-                        cardbg: '#121216',
-                        bordercolor: '#27272a',
-                        accentglow: '#6366f1',
-                        accentviolet: '#8b5cf6',
+                        themebg: 'var(--bg)',
+                        themetxt: 'var(--txt)',
+                        themecard: 'var(--card)',
+                        themeborder: 'var(--border)',
+                        themeaccent: 'var(--accent)',
+                        themesecondary: 'var(--secondary)',
                     },
                     fontFamily: {
-                        sans: ['Inter', 'sans-serif'],
+                        sans: ['-apple-system', 'BlinkMacSystemFont', 'SF Pro Text', 'Inter', 'sans-serif'],
                     },
+                    letterSpacing: {
+                        tighter: '-0.04em',
+                        tight: '-0.02em',
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    }
                 }
             }
         }
     </script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
+        /* Theme Variables Engine */
+        :root.theme-night {
+            --bg: #000000;
+            --txt: #f5f5f7;
+            --secondary: #86868b;
+            --card: rgba(29, 29, 31, 0.7);
+            --border: rgba(255, 255, 255, 0.1);
+            --accent: #2997ff;
+            --glow-1: rgba(41, 151, 255, 0.15);
+            --glow-2: rgba(139, 92, 246, 0.1);
+        }
+        
+        :root.theme-day {
+            --bg: #fbfbfd;
+            --txt: #1d1d1f;
+            --secondary: #86868b;
+            --card: rgba(255, 255, 255, 0.7);
+            --border: rgba(0, 0, 0, 0.08);
+            --accent: #0066cc;
+            --glow-1: rgba(0, 102, 204, 0.08);
+            --glow-2: rgba(139, 92, 246, 0.05);
+        }
+
+        :root.theme-evening {
+            --bg: #2c2420;
+            --txt: #f5ede6;
+            --secondary: #bbaea6;
+            --card: rgba(61, 51, 46, 0.7);
+            --border: rgba(255, 255, 255, 0.08);
+            --accent: #d9774a;
+            --glow-1: rgba(217, 119, 74, 0.15);
+            --glow-2: rgba(255, 180, 100, 0.1);
+        }
+
         body {
-            font-family: 'Inter', sans-serif;
-            background-color: #09090b;
-            color: #f4f4f5;
+            background-color: var(--bg);
+            color: var(--txt);
+            transition: background-color 0.5s ease, color 0.5s ease;
             overflow-x: hidden;
         }
-        .ambient-glow-1 {
-            position: absolute;
-            top: -10%;
-            left: 20%;
-            width: 600px;
-            height: 600px;
-            background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, rgba(139, 92, 246, 0.05) 50%, transparent 80%);
-            z-index: 0;
+
+        /* Ambient Apple-style Background Glows */
+        .ambient-glow-1, .ambient-glow-2 {
+            position: fixed;
+            border-radius: 50%;
             pointer-events: none;
-            filter: blur(80px);
+            filter: blur(100px);
+            z-index: 0;
+            transition: background 0.8s ease;
+        }
+        .ambient-glow-1 {
+            top: -10%; left: 10%; width: 50vw; height: 50vw;
+            background: radial-gradient(circle, var(--glow-1) 0%, transparent 70%);
         }
         .ambient-glow-2 {
-            position: absolute;
-            top: 40%;
-            right: -10%;
-            width: 500px;
-            height: 500px;
-            background: radial-gradient(circle, rgba(139, 92, 246, 0.12) 0%, rgba(59, 130, 246, 0.04) 50%, transparent 75%);
-            z-index: 0;
-            pointer-events: none;
-            filter: blur(90px);
+            bottom: -10%; right: 10%; width: 40vw; height: 40vw;
+            background: radial-gradient(circle, var(--glow-2) 0%, transparent 70%);
         }
-        .glass-card {
-            background: rgba(18, 18, 22, 0.75);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+
+        /* Glassmorphism Utilities */
+        .glass {
+            background: var(--card);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid var(--border);
+            transition: background 0.5s ease, border-color 0.5s ease;
         }
-        .glass-card:hover {
-            border-color: rgba(99, 102, 241, 0.3);
-            box-shadow: 0 0 30px rgba(99, 102, 241, 0.1);
+
+        /* Scroll Reveal Animations */
+        .reveal {
+            opacity: 0;
+            transform: translateY(40px) scale(0.98);
+            transition: all 1s cubic-bezier(0.16, 1, 0.3, 1);
         }
+        .reveal.active {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+
+        /* Hide scrollbar for a cleaner Apple look */
         ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: #09090b; }
-        ::-webkit-scrollbar-thumb { background: #27272a; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+
+        /* Sticky Typography constraints */
+        .story-text {
+            background: linear-gradient(180deg, var(--txt) 0%, var(--secondary) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
     </style>
 </head>
-<body class="bg-darkbg text-zinc-100 antialiased selection:bg-indigo-500 selection:text-white relative">
+<body class="antialiased selection:bg-themeaccent selection:text-white">
+
+    <!-- Background Ambient Elements -->
     <div class="ambient-glow-1" aria-hidden="true"></div>
     <div class="ambient-glow-2" aria-hidden="true"></div>
 
-    <header class="sticky top-0 z-50 backdrop-blur-xl bg-darkbg/80 border-b border-zinc-800/80">
-        <div class="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
-            <a href="#" class="flex items-center space-x-3" aria-label="VeeType home">
-                <span class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/25">
-                    <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path>
-                    </svg>
+    <!-- Sticky Glass Header -->
+    <header class="fixed top-0 w-full z-50 glass border-b-0 border-themeborder">
+        <div class="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between text-sm font-medium">
+            <a href="#" class="flex items-center space-x-2 tracking-tight">
+                <span class="w-6 h-6 rounded-md bg-themeaccent flex items-center justify-center text-white">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path></svg>
                 </span>
-                <span class="text-xl font-bold tracking-tight text-white">Vee<span class="text-indigo-400">Type</span></span>
+                <span class="font-semibold text-themetxt text-lg">VeeType</span>
             </a>
-            <nav class="hidden md:flex items-center space-x-8 text-sm font-medium text-zinc-400" aria-label="Main navigation">
-                <a href="#features" class="hover:text-white transition-colors">Features</a>
-                <a href="#demo" class="hover:text-white transition-colors">Interactive Demo</a>
-                <a href="#download" class="hover:text-white transition-colors">Download</a>
+            <nav class="hidden md:flex space-x-8 text-themesecondary">
+                <a href="#magic" class="hover:text-themetxt transition-colors">How it Works</a>
+                <a href="#features" class="hover:text-themetxt transition-colors">Architecture</a>
+                <a href="#compare" class="hover:text-themetxt transition-colors">Compare</a>
             </nav>
-            <a href="#download" class="inline-flex items-center justify-center px-5 py-2.5 rounded-full text-sm font-medium text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-lg shadow-indigo-500/25 transition-all transform hover:-translate-y-0.5">
-                Get VeeType
-            </a>
+            <div class="flex items-center space-x-4">
+                <!-- Theme Switcher Button -->
+                <button id="themeToggle" class="p-2 rounded-full hover:bg-themeborder transition-colors text-themesecondary hover:text-themetxt" aria-label="Toggle Theme">
+                    <svg id="themeIcon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <!-- Default to Moon (Night) -->
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path>
+                    </svg>
+                </button>
+                <a href="#download" class="px-4 py-1.5 rounded-full bg-themetxt text-themebg hover:opacity-90 transition-opacity tracking-tight">Download</a>
+            </div>
         </div>
     </header>
 
-    <main>
-        <section class="relative pt-20 pb-28 px-6 text-center max-w-5xl mx-auto z-10">
-            <div class="inline-flex items-center space-x-2 px-3 py-1.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-semibold mb-8">
-                <span class="w-2 h-2 rounded-full bg-indigo-400"></span>
-                <span>Voice dictation for Windows</span>
-            </div>
-            <h1 class="text-5xl sm:text-7xl font-extrabold tracking-tight text-white mb-8 leading-[1.1]">
-                Turn your voice into<br class="hidden sm:inline">
-                <span class="bg-gradient-to-r from-indigo-400 via-violet-400 to-blue-400 bg-clip-text text-transparent">polished text</span>
+    <main class="relative z-10">
+        <!-- Section 1: The Apple-Style Hero -->
+        <section class="min-h-screen flex flex-col items-center justify-center px-6 pt-20 text-center">
+            <h1 class="text-6xl md:text-8xl font-bold tracking-tighter mb-4 reveal">
+                Think it.<br>Speak it.<br><span class="story-text">VeeType it.</span>
             </h1>
-            <p class="text-lg sm:text-xl text-zinc-400 max-w-2xl mx-auto mb-12 font-normal leading-relaxed">
-                Dictate into the app you’re already using. VeeType transcribes speech locally, applies your vocabulary, and can polish text with a local model or an optional cloud provider.
+            <p class="text-xl md:text-2xl text-themesecondary max-w-2xl font-medium tracking-tight mb-12 reveal" style="transition-delay: 100ms;">
+                The enterprise-grade Windows dictation engine. Zero-latency local transcription. Absolute data privacy.
             </p>
-            <div class="flex flex-col sm:flex-row items-center justify-center gap-4 mb-10">
-                <a href="#download" class="w-full sm:w-auto px-8 py-4 rounded-2xl text-base font-semibold text-white bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 shadow-xl shadow-indigo-500/30 transition-all flex items-center justify-center space-x-3 transform hover:-translate-y-0.5">
-                    <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4h-13.051M0 12.6h9.75v9.451L0 20.701M10.949 12.6H24V24l-13.051-1.801"/></svg>
-                    <span>Get VeeType for Windows</span>
-                </a>
-                <a href="#demo" class="w-full sm:w-auto px-8 py-4 rounded-2xl text-base font-semibold text-zinc-200 bg-zinc-800/80 hover:bg-zinc-700/80 border border-zinc-700 transition-all text-center">
-                    Explore the demo
-                </a>
-            </div>
-            <div class="text-xs text-zinc-500 flex flex-wrap items-center justify-center gap-x-6 gap-y-2">
-                <span>✓ Windows desktop app</span>
-                <span>✓ Local speech transcription</span>
-                <span>✓ Cloud polishing is optional</span>
+            
+            <!-- Interactive Demo UI (Mac/Windows App Style) -->
+            <div class="w-full max-w-4xl glass rounded-2xl md:rounded-[2rem] p-2 md:p-4 shadow-2xl reveal mx-auto" style="transition-delay: 200ms;">
+                <div class="bg-themebg/80 rounded-xl md:rounded-3xl border border-themeborder overflow-hidden">
+                    <!-- Fake Window Header -->
+                    <div class="h-12 border-b border-themeborder flex items-center px-4 justify-between bg-themeborder/30">
+                        <div class="flex space-x-2">
+                            <div class="w-3 h-3 rounded-full bg-red-500"></div>
+                            <div class="w-3 h-3 rounded-full bg-yellow-500"></div>
+                            <div class="w-3 h-3 rounded-full bg-green-500"></div>
+                        </div>
+                        <div class="text-xs font-mono text-themesecondary tracking-widest uppercase">Engine Status: Ready</div>
+                        <div class="w-10"></div> <!-- Spacer for centering -->
+                    </div>
+                    
+                    <!-- App Content -->
+                    <div class="p-8 md:p-12 flex flex-col items-center justify-center min-h-[300px]">
+                        <div id="outputContent" class="text-xl md:text-2xl text-center text-themetxt font-medium leading-relaxed max-w-2xl min-h-[80px] mb-12">
+                            "Click the microphone to preview how raw speech is transformed into polished, professional prose."
+                        </div>
+                        
+                        <!-- Mic Controls -->
+                        <div class="flex items-center space-x-6">
+                            <!-- Visualizer -->
+                            <div class="flex items-center space-x-1.5 h-12" aria-hidden="true">
+                                <span class="waveform-bar w-1.5 h-3 bg-themeaccent rounded-full transition-all duration-150"></span>
+                                <span class="waveform-bar w-1.5 h-6 bg-themeaccent/80 rounded-full transition-all duration-150"></span>
+                                <span class="waveform-bar w-1.5 h-4 bg-themeaccent rounded-full transition-all duration-150"></span>
+                                <span class="waveform-bar w-1.5 h-8 bg-themeaccent/60 rounded-full transition-all duration-150"></span>
+                                <span class="waveform-bar w-1.5 h-5 bg-themeaccent rounded-full transition-all duration-150"></span>
+                            </div>
+                            
+                            <button id="recordBtn" class="w-16 h-16 rounded-full bg-themeaccent text-white flex items-center justify-center shadow-lg hover:scale-105 transition-transform">
+                                <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path></svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
             </div>
         </section>
 
-        <section id="demo" class="py-16 px-6 max-w-4xl mx-auto z-10 relative">
-            <div class="text-center mb-10">
-                <h2 class="text-2xl sm:text-3xl font-bold text-white mb-2">Try the interactive demo</h2>
-                <p class="text-zinc-400 text-sm">This is a UI preview with sample text; it does not access your microphone or perform live transcription.</p>
-            </div>
-            <div class="glass-card rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
-                <div class="flex items-center justify-between pb-6 border-b border-zinc-800/80 mb-6">
-                    <div class="flex items-center space-x-2">
-                        <span class="w-3 h-3 rounded-full bg-red-500/80"></span>
-                        <span class="w-3 h-3 rounded-full bg-yellow-500/80"></span>
-                        <span class="w-3 h-3 rounded-full bg-green-500/80"></span>
-                        <span class="ml-4 text-xs font-mono text-zinc-400">veetype-dictation.txt</span>
-                    </div>
-                    <div id="statusBadge" class="px-3 py-1 rounded-full bg-zinc-800 text-xs font-medium text-zinc-400 flex items-center space-x-2" role="status" aria-live="polite">
-                        <span id="statusDot" class="w-2 h-2 rounded-full bg-zinc-500"></span>
-                        <span id="statusText">Demo ready</span>
-                    </div>
-                </div>
-                <div class="bg-zinc-950/80 rounded-2xl p-6 border border-zinc-800/60 min-h-[180px] font-mono text-sm text-zinc-200 mb-6 relative flex flex-col justify-between">
-                    <div id="outputContent" class="leading-relaxed whitespace-pre-wrap text-zinc-300" aria-live="polite">Press “Play sample” to preview how dictated words can appear as polished text.</div>
-                    <div class="mt-4 pt-4 border-t border-zinc-900 flex items-center justify-between text-xs text-zinc-500">
-                        <span id="wordCount">Sample preview</span>
-                        <span class="text-indigo-400 font-sans font-medium">VeeType demo</span>
-                    </div>
-                </div>
-                <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
-                    <div class="flex items-center space-x-2 w-full sm:w-48 h-10 bg-zinc-900/80 rounded-xl px-4 justify-center border border-zinc-800" aria-hidden="true">
-                        <span class="waveform-bar w-1 h-3 bg-indigo-500 rounded-full transition-all duration-150"></span>
-                        <span class="waveform-bar w-1 h-6 bg-indigo-400 rounded-full transition-all duration-150"></span>
-                        <span class="waveform-bar w-1 h-4 bg-indigo-600 rounded-full transition-all duration-150"></span>
-                        <span class="waveform-bar w-1 h-8 bg-violet-500 rounded-full transition-all duration-150"></span>
-                        <span class="waveform-bar w-1 h-5 bg-indigo-500 rounded-full transition-all duration-150"></span>
-                        <span class="waveform-bar w-1 h-3 bg-zinc-600 rounded-full transition-all duration-150"></span>
-                    </div>
-                    <button id="recordBtn" type="button" class="w-full sm:w-auto px-8 py-3.5 rounded-xl font-medium text-white bg-indigo-600 hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-600/30 flex items-center justify-center space-x-3">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path>
+        <!-- Section 2: Huge Statement -->
+        <section class="py-40 px-6 text-center max-w-4xl mx-auto">
+            <h2 class="text-4xl md:text-6xl font-bold tracking-tighter story-text leading-tight reveal">
+                We rebuilt dictation from the metal up. No subscriptions. No cloud latency. Just your voice and your machine.
+            </h2>
+        </section>
+
+        <!-- Section 3: Sticky Scroll Storytelling (How it Works) -->
+        <section id="magic" class="relative">
+            <!-- Sticky Container -->
+            <div class="sticky top-0 h-screen flex flex-col md:flex-row items-center justify-center px-6 max-w-7xl mx-auto overflow-hidden">
+                <!-- Left: Visuals -->
+                <div class="w-full md:w-1/2 flex justify-center items-center h-1/2 md:h-full relative">
+                    <div class="w-64 h-64 md:w-96 md:h-96 rounded-full bg-themeaccent/10 flex items-center justify-center relative shadow-[0_0_100px_var(--glow-1)]">
+                        <!-- Icon transitions based on scroll -->
+                        <svg id="storyIcon" class="w-24 h-24 text-themeaccent transition-all duration-500" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"></path>
                         </svg>
-                        <span id="recordBtnText">Play sample</span>
-                    </button>
+                    </div>
+                </div>
+                
+                <!-- Right: Scrolling Text -->
+                <div class="w-full md:w-1/2 h-[50vh] md:h-[80vh] overflow-y-auto pr-4 pb-32" id="storyScroller">
+                    <div class="h-[40vh]"></div> <!-- Spacer -->
+                    
+                    <div class="story-step mb-[40vh] transition-opacity duration-300 opacity-20" data-step="1">
+                        <h3 class="text-3xl font-bold mb-4">1. Hit the global hotkey.</h3>
+                        <p class="text-xl text-themesecondary font-medium">VeeType floats silently in the background. Press your custom hotkey and a glassmorphic pill appears, ready to listen across any Windows app.</p>
+                    </div>
+                    
+                    <div class="story-step mb-[40vh] transition-opacity duration-300 opacity-20" data-step="2">
+                        <h3 class="text-3xl font-bold mb-4">2. WebRTC Noise Suppression.</h3>
+                        <p class="text-xl text-themesecondary font-medium">Mechanical keyboard clicks? Fan noise? Gone. Our Voice Activity Detector (VAD) strips ambient audio instantly, feeding pristine vocals to the engine.</p>
+                    </div>
+                    
+                    <div class="story-step mb-[40vh] transition-opacity duration-300 opacity-20" data-step="3">
+                        <h3 class="text-3xl font-bold mb-4">3. Local Hardware Acceleration.</h3>
+                        <p class="text-xl text-themesecondary font-medium">VeeType dynamically detects your hardware. Got an NVIDIA GPU? It routes via CUDA for instantaneous output. Standard laptop? It falls back to optimized CPU threads automatically.</p>
+                    </div>
+                    
+                    <div class="story-step mb-[40vh] transition-opacity duration-300 opacity-20" data-step="4">
+                        <h3 class="text-3xl font-bold mb-4">4. Typed flawlessly.</h3>
+                        <p class="text-xl text-themesecondary font-medium">The local LLM polishes your phrasing, drops the filler words, injects your custom jargon, and pastes the result seamlessly into your IDE, browser, or Word doc.</p>
+                    </div>
+                    
+                    <div class="h-[40vh]"></div> <!-- Spacer -->
                 </div>
             </div>
         </section>
 
-        <section id="features" class="py-24 px-6 max-w-7xl mx-auto relative z-10">
-            <div class="text-center max-w-3xl mx-auto mb-16">
-                <h2 class="text-3xl sm:text-4xl font-bold text-white mb-4">Designed for your workflow</h2>
-                <p class="text-zinc-400 text-base">A focused Windows dictation tool with local-first transcription and flexible text polishing.</p>
-            </div>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-                <article class="glass-card rounded-3xl p-8 transition-all transform hover:-translate-y-1">
-                    <div class="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mb-6 shadow-inner" aria-hidden="true">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+        <!-- Section 4: The Bento Box (Architecture) -->
+        <section id="features" class="py-32 px-6 max-w-7xl mx-auto">
+            <h2 class="text-4xl md:text-5xl font-bold tracking-tighter text-center mb-16 reveal">Engineered for Professionals.</h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 auto-rows-[240px]">
+                <!-- Large Feature -->
+                <div class="glass rounded-3xl p-8 md:col-span-2 flex flex-col justify-end relative overflow-hidden reveal group">
+                    <div class="absolute top-8 right-8 w-16 h-16 rounded-2xl bg-themeaccent/10 flex items-center justify-center text-themeaccent">
+                        <svg class="w-8 h-8" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
                     </div>
-                    <h3 class="text-xl font-bold text-white mb-3">Dictate anywhere</h3>
-                    <p class="text-zinc-400 text-sm leading-relaxed">Use a configurable global hotkey to start dictating into the application you’re working in, with a lightweight floating status pill.</p>
-                </article>
-                <article class="glass-card rounded-3xl p-8 transition-all transform hover:-translate-y-1">
-                    <div class="w-12 h-12 rounded-2xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-400 mb-6 shadow-inner" aria-hidden="true">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                    <h3 class="text-2xl font-bold mb-2 z-10">100% Private Architecture</h3>
+                    <p class="text-themesecondary font-medium max-w-md z-10">Running entirely on local Whisper and Qwen GGUF models. Your sensitive code and NDA business conversations never leave your device.</p>
+                </div>
+                
+                <!-- Small Feature -->
+                <div class="glass rounded-3xl p-8 flex flex-col justify-end relative overflow-hidden reveal group" style="transition-delay: 100ms;">
+                    <div class="absolute top-8 right-8 text-themeaccent"><svg class="w-10 h-10" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg></div>
+                    <h3 class="text-xl font-bold mb-2">Zero-Lag Throttling</h3>
+                    <p class="text-themesecondary text-sm font-medium">Windows priority yielding ensures VeeType never stutters your video editor or gaming.</p>
+                </div>
+                
+                <!-- Small Feature -->
+                <div class="glass rounded-3xl p-8 flex flex-col justify-end relative overflow-hidden reveal group">
+                    <div class="absolute top-8 right-8 text-themeaccent"><svg class="w-10 h-10" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg></div>
+                    <h3 class="text-xl font-bold mb-2">Custom Jargon Dictionary</h3>
+                    <p class="text-themesecondary text-sm font-medium">Stop fighting autocorrect. Teach the engine your custom tech stacks and names.</p>
+                </div>
+                
+                <!-- Large Feature -->
+                <div class="glass rounded-3xl p-8 md:col-span-2 flex flex-col justify-end relative overflow-hidden reveal group" style="transition-delay: 100ms;">
+                    <div class="absolute top-8 right-8 w-16 h-16 rounded-2xl bg-themeaccent/10 flex items-center justify-center text-themeaccent">
+                        <svg class="w-8 h-8" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
                     </div>
-                    <h3 class="text-xl font-bold text-white mb-3">Local transcription</h3>
-                    <p class="text-zinc-400 text-sm leading-relaxed">Speech recognition runs on your PC using a local Whisper model. If you choose cloud text polishing, that transcript is sent to the selected provider.</p>
-                </article>
-                <article class="glass-card rounded-3xl p-8 transition-all transform hover:-translate-y-1">
-                    <div class="w-12 h-12 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400 mb-6 shadow-inner" aria-hidden="true">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"></path></svg>
-                    </div>
-                    <h3 class="text-xl font-bold text-white mb-3">Your words, your terms</h3>
-                    <p class="text-zinc-400 text-sm leading-relaxed">Add names and specialist vocabulary, choose writing prompts, and review saved dictations in the searchable local Vault.</p>
-                </article>
+                    <h3 class="text-2xl font-bold mb-2 z-10">Over-The-Air (OTA) Updates</h3>
+                    <p class="text-themesecondary font-medium max-w-md z-10">VeeType updates itself silently in the background just like a modern OS. Never visit a download page or run an uninstaller again.</p>
+                </div>
             </div>
         </section>
 
-        <section id="download" class="py-20 px-6 max-w-5xl mx-auto relative z-10">
-            <div class="glass-card rounded-3xl p-10 sm:p-16 text-center relative overflow-hidden border border-indigo-500/30 bg-gradient-to-b from-indigo-950/30 to-darkbg">
-                <div class="absolute inset-0 bg-gradient-to-r from-indigo-600/10 to-violet-600/15 pointer-events-none" aria-hidden="true"></div>
-                <h2 class="text-3xl sm:text-5xl font-extrabold text-white mb-6 relative z-10">Ready to try VeeType?</h2>
-                <p class="text-zinc-400 text-base sm:text-lg max-w-xl mx-auto mb-8 relative z-10">
-                    VeeType is a Windows desktop app. The installer will be linked here when a distributable release is published.
-                </p>
-                <span class="inline-flex px-6 py-3 rounded-xl text-sm font-semibold text-zinc-300 bg-zinc-800/80 border border-zinc-700 relative z-10" aria-label="Installer not yet available">Windows installer coming soon</span>
-                <p class="text-xs text-zinc-500 mt-6 relative z-10">Local models are included in the installer package when available.</p>
+        <!-- Section 5: The Comparison -->
+        <section id="compare" class="py-32 px-6 max-w-5xl mx-auto border-t border-themeborder">
+            <div class="text-center mb-16 reveal">
+                <h2 class="text-4xl md:text-5xl font-bold tracking-tighter mb-4">Why VeeType?</h2>
+                <p class="text-xl text-themesecondary font-medium">Compared to standard built-in dictation or expensive cloud subscriptions.</p>
+            </div>
+            
+            <div class="glass rounded-3xl overflow-hidden reveal">
+                <div class="grid grid-cols-3 border-b border-themeborder bg-themeborder/30">
+                    <div class="p-6 font-semibold text-themesecondary uppercase tracking-wider text-xs">Feature</div>
+                    <div class="p-6 font-semibold text-themesecondary uppercase tracking-wider text-xs text-center border-l border-themeborder">Cloud Subscriptions</div>
+                    <div class="p-6 font-semibold text-themeaccent uppercase tracking-wider text-xs text-center border-l border-themeborder">VeeType</div>
+                </div>
+                
+                <div class="grid grid-cols-3 border-b border-themeborder hover:bg-themeborder/10 transition-colors">
+                    <div class="p-6 font-medium">Privacy</div>
+                    <div class="p-6 text-center text-themesecondary">Data sent to servers</div>
+                    <div class="p-6 text-center font-bold text-themetxt border-l border-themeborder">100% Local / Offline</div>
+                </div>
+                <div class="grid grid-cols-3 border-b border-themeborder hover:bg-themeborder/10 transition-colors">
+                    <div class="p-6 font-medium">Cost</div>
+                    <div class="p-6 text-center text-themesecondary">$15 - $30 / month</div>
+                    <div class="p-6 text-center font-bold text-themetxt border-l border-themeborder">One-time / Free Beta</div>
+                </div>
+                <div class="grid grid-cols-3 border-b border-themeborder hover:bg-themeborder/10 transition-colors">
+                    <div class="p-6 font-medium">Background Noise</div>
+                    <div class="p-6 text-center text-themesecondary">Picks up keyboard clicks</div>
+                    <div class="p-6 text-center font-bold text-themetxt border-l border-themeborder">WebRTC VAD Stripping</div>
+                </div>
+                <div class="grid grid-cols-3 hover:bg-themeborder/10 transition-colors">
+                    <div class="p-6 font-medium">AI Polish</div>
+                    <div class="p-6 text-center text-themesecondary">Standard text</div>
+                    <div class="p-6 text-center font-bold text-themetxt border-l border-themeborder">Local Contextual LLM</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 6: CTA / Download -->
+        <section id="download" class="py-40 px-6 text-center">
+            <h2 class="text-5xl md:text-7xl font-bold tracking-tighter mb-8 reveal">Ready to dictate?</h2>
+            <div class="reveal" style="transition-delay: 100ms;">
+                <a href="#" class="inline-block px-10 py-5 rounded-full text-lg font-bold text-white bg-themeaccent hover:scale-105 transition-transform shadow-[0_0_40px_var(--glow-1)]">
+                    Download for Windows
+                </a>
+                <p class="mt-6 text-themesecondary font-medium text-sm">v1.0-Beta • Requires Windows 10/11 x64 • Free Download</p>
             </div>
         </section>
     </main>
 
-    <footer class="border-t border-zinc-800/80 py-12 px-6 max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between text-zinc-500 text-sm">
-        <div class="flex items-center space-x-3 mb-4 sm:mb-0">
-            <span class="font-bold text-white">VeeType</span>
-            <span>&copy; 2026 VeeType</span>
+    <footer class="border-t border-themeborder py-12 px-6 max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center text-themesecondary text-sm font-medium">
+        <div class="mb-4 md:mb-0">
+            <span class="font-bold text-themetxt mr-2">VeeType</span> &copy; 2026 Enterprise AI Studio
         </div>
-        <span>Windows voice dictation</span>
+        <div class="flex space-x-6">
+            <a href="#" class="hover:text-themetxt transition-colors">Privacy Policy</a>
+            <a href="#" class="hover:text-themetxt transition-colors">Terms of Service</a>
+            <a href="#" class="hover:text-themetxt transition-colors">GitHub</a>
+        </div>
     </footer>
 
+    <!-- Scripts -->
     <script>
+        // 1. Theme Engine
+        const themes = ['theme-night', 'theme-day', 'theme-evening'];
+        const icons = {
+            'theme-night': '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path>',
+            'theme-day': '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path>',
+            'theme-evening': '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"></path>' // Sunset/Moon variant
+        };
+        let currentThemeIndex = 0;
+        const htmlEl = document.documentElement;
+        const themeIcon = document.getElementById('themeIcon');
+
+        document.getElementById('themeToggle').addEventListener('click', () => {
+            htmlEl.classList.remove(themes[currentThemeIndex]);
+            currentThemeIndex = (currentThemeIndex + 1) % themes.length;
+            const newTheme = themes[currentThemeIndex];
+            htmlEl.classList.add(newTheme);
+            themeIcon.innerHTML = icons[newTheme];
+        });
+
+        // 2. Scroll Reveal Observer
+        const revealElements = document.querySelectorAll('.reveal');
+        const revealObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('active');
+                }
+            });
+        }, { threshold: 0.1, rootMargin: "0px 0px -50px 0px" });
+        revealElements.forEach(el => revealObserver.observe(el));
+
+        // 3. Apple-Style Sticky Scroll Storytelling
+        const storyScroller = document.getElementById('storyScroller');
+        const storySteps = document.querySelectorAll('.story-step');
+        const storyIcon = document.getElementById('storyIcon');
+        
+        // SVGs for different steps
+        const stepIcons = [
+            '<path stroke-linecap="round" stroke-linejoin="round" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"></path>', // Cursor/Click
+            '<path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 100-6 3 3 0 000 6z"></path>', // Mic/Noise
+            '<path stroke-linecap="round" stroke-linejoin="round" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"></path>', // CPU/Chip
+            '<path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>' // Document/Text
+        ];
+
+        storyScroller.addEventListener('scroll', () => {
+            const scrollPos = storyScroller.scrollTop + (storyScroller.clientHeight / 2);
+            
+            storySteps.forEach((step, index) => {
+                const stepTop = step.offsetTop;
+                const stepBottom = stepTop + step.offsetHeight;
+                
+                if (scrollPos >= stepTop && scrollPos < stepBottom) {
+                    // Make active text bright
+                    step.classList.remove('opacity-20');
+                    step.classList.add('opacity-100');
+                    // Change icon
+                    storyIcon.innerHTML = stepIcons[index];
+                } else {
+                    // Dim inactive text
+                    step.classList.remove('opacity-100');
+                    step.classList.add('opacity-20');
+                }
+            });
+        });
+
+        // Trigger initial scroll state check
+        storyScroller.dispatchEvent(new Event('scroll'));
+
+        // 4. Interactive Demo Logic
         const samples = [
-            "Please send the updated project notes to the team this afternoon, and include the latest design changes.",
-            "The local transcription engine keeps speech recognition on this computer. Cloud polishing is optional.",
-            "Remember to review the API response, update the documentation, and add a test for the new behavior."
+            "We need to implement the hardware fallback engine to prevent crashes on laptops without dedicated GPUs.",
+            "Please compile the final release binary and ensure the Inno Setup installer places it in the AppData directory for seamless OTA updates.",
+            "The new WebRTC VAD filter successfully strips all mechanical keyboard noise before the audio reaches the Whisper model."
         ];
         const output = document.getElementById('outputContent');
-        const status = document.getElementById('statusText');
-        const statusBadge = document.getElementById('statusBadge');
-        const statusDot = document.getElementById('statusDot');
-        const buttonText = document.getElementById('recordBtnText');
-        const wordCount = document.getElementById('wordCount');
+        const buttonText = document.querySelector('#recordBtn svg');
         const bars = document.querySelectorAll('.waveform-bar');
         let sampleIndex = 0;
         let typingTimer;
         let animationTimer;
 
-        document.getElementById('recordBtn').addEventListener('click', () => {
+        document.getElementById('recordBtn').addEventListener('click', function() {
             window.clearInterval(typingTimer);
             window.clearInterval(animationTimer);
-            buttonText.textContent = 'Playing sample...';
-            status.textContent = 'Previewing sample text';
-            statusBadge.className = 'px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-xs font-medium text-indigo-300 flex items-center space-x-2';
-            statusDot.className = 'w-2 h-2 rounded-full bg-indigo-400 animate-pulse';
+            
+            // Add pulse effect to button
+            this.classList.add('animate-pulse');
             output.textContent = '';
+            
             const text = samples[sampleIndex++ % samples.length];
             let position = 0;
 
+            // Animate waveform
             animationTimer = window.setInterval(() => {
                 bars.forEach(bar => {
                     bar.style.height = `${Math.floor(Math.random() * 24) + 8}px`;
                 });
-            }, 160);
+            }, 100);
+
+            // Type text
             typingTimer = window.setInterval(() => {
                 if (position < text.length) {
                     output.textContent += text.charAt(position++);
@@ -262,13 +468,9 @@
                     window.clearInterval(typingTimer);
                     window.clearInterval(animationTimer);
                     bars.forEach(bar => { bar.style.height = '12px'; });
-                    buttonText.textContent = 'Play another sample';
-                    status.textContent = 'Preview complete';
-                    statusBadge.className = 'px-3 py-1 rounded-full bg-green-500/10 border border-green-500/20 text-xs font-medium text-green-400 flex items-center space-x-2';
-                    statusDot.className = 'w-2 h-2 rounded-full bg-green-500';
-                    wordCount.textContent = `${text.trim().split(/\s+/).length} words · sample preview`;
+                    document.getElementById('recordBtn').classList.remove('animate-pulse');
                 }
-            }, 28);
+            }, 30);
         });
     </script>
 </body>
