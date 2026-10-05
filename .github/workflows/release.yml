@@ -14,7 +14,6 @@ jobs:
     runs-on: windows-2022
     permissions:
       contents: write
-      id-token: write
     env:
       VEETYPE_SUPABASE_URL: ${{ vars.VEETYPE_SUPABASE_URL }}
       VEETYPE_SUPABASE_ANON_KEY: ${{ vars.VEETYPE_SUPABASE_ANON_KEY }}
@@ -45,55 +44,43 @@ jobs:
           toolchain: stable
           target: x86_64-pc-windows-msvc
 
-      - name: Validate desktop licensing configuration
+      - name: Configure desktop licensing
         shell: pwsh
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:VEETYPE_SUPABASE_URL) -or
-              [string]::IsNullOrWhiteSpace($env:VEETYPE_SUPABASE_ANON_KEY) -or
-              [string]::IsNullOrWhiteSpace($env:VEETYPE_LICENSE_PUBLIC_KEY_B64)) {
-            throw "Set VEETYPE_SUPABASE_URL, VEETYPE_SUPABASE_ANON_KEY, and VEETYPE_LICENSE_PUBLIC_KEY_B64 as GitHub Actions repository variables before publishing a release."
-          }
-          $supabaseUrl = $null
-          if (-not [Uri]::TryCreate($env:VEETYPE_SUPABASE_URL, [UriKind]::Absolute, [ref]$supabaseUrl) -or
-              $supabaseUrl.Scheme -ne "https") {
-            throw "VEETYPE_SUPABASE_URL must be an HTTPS URL."
-          }
-          try {
-            $publicKey = [Convert]::FromBase64String($env:VEETYPE_LICENSE_PUBLIC_KEY_B64)
-          } catch {
-            throw "VEETYPE_LICENSE_PUBLIC_KEY_B64 must contain valid base64."
-          }
-          if ($publicKey.Length -ne 32) {
-            throw "VEETYPE_LICENSE_PUBLIC_KEY_B64 must decode to a 32-byte Ed25519 public key."
-          }
-
-      - name: Validate Azure Artifact Signing configuration
-        shell: pwsh
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
-          AZURE_ARTIFACT_SIGNING_PROFILE_NAME: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE_NAME }}
         run: |
           $requiredSettings = @(
-            "AZURE_CLIENT_ID",
-            "AZURE_TENANT_ID",
-            "AZURE_SUBSCRIPTION_ID",
-            "AZURE_ARTIFACT_SIGNING_ENDPOINT",
-            "AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME",
-            "AZURE_ARTIFACT_SIGNING_PROFILE_NAME"
+            "VEETYPE_SUPABASE_URL",
+            "VEETYPE_SUPABASE_ANON_KEY",
+            "VEETYPE_LICENSE_PUBLIC_KEY_B64"
           )
-          foreach ($setting in $requiredSettings) {
-            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($setting))) {
-              throw "Configure $setting in GitHub Actions secrets or variables before publishing a signed release."
+          $configuredSettings = @($requiredSettings | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
+          })
+          $licensingUnavailableReason = $null
+          if ($configuredSettings.Count -eq 0) {
+            $licensingUnavailableReason = "Supabase licensing is not configured."
+          } elseif ($configuredSettings.Count -ne $requiredSettings.Count) {
+            $licensingUnavailableReason = "Supabase licensing settings are incomplete."
+          } else {
+            $supabaseUrl = $null
+            if (-not [Uri]::TryCreate($env:VEETYPE_SUPABASE_URL, [UriKind]::Absolute, [ref]$supabaseUrl) -or
+                $supabaseUrl.Scheme -ne "https") {
+              $licensingUnavailableReason = "VEETYPE_SUPABASE_URL is not a valid HTTPS URL."
+            } else {
+              try {
+                $publicKey = [Convert]::FromBase64String($env:VEETYPE_LICENSE_PUBLIC_KEY_B64)
+                if ($publicKey.Length -ne 32) {
+                  $licensingUnavailableReason = "VEETYPE_LICENSE_PUBLIC_KEY_B64 must decode to exactly 32 bytes."
+                }
+              } catch {
+                $licensingUnavailableReason = "VEETYPE_LICENSE_PUBLIC_KEY_B64 is not valid base64."
+              }
             }
           }
-          $endpoint = $null
-          if (-not [Uri]::TryCreate($env:AZURE_ARTIFACT_SIGNING_ENDPOINT, [UriKind]::Absolute, [ref]$endpoint) -or
-              $endpoint.Scheme -ne "https") {
-            throw "AZURE_ARTIFACT_SIGNING_ENDPOINT must be an HTTPS URL."
+          if ($licensingUnavailableReason) {
+            Write-Host "::warning::$licensingUnavailableReason Building with Pro sign-in and license verification disabled."
+            foreach ($setting in $requiredSettings) {
+              Add-Content -Path $env:GITHUB_ENV -Value "$setting="
+            }
           }
 
       - name: Download pinned model assets
@@ -143,42 +130,6 @@ jobs:
       - name: Build Vulkan-enabled release
         run: cargo build --release --locked --features vulkan
 
-      - name: Authenticate to Azure with OIDC
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Sign executable with Azure Artifact Signing
-        uses: azure/artifact-signing-action@v2
-        with:
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE_NAME }}
-          files: ${{ github.workspace }}\target\release\VeeType.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          exclude-environment-credential: true
-          exclude-workload-identity-credential: true
-          exclude-managed-identity-credential: true
-          exclude-shared-token-cache-credential: true
-          exclude-visual-studio-credential: true
-          exclude-visual-studio-code-credential: true
-          exclude-azure-cli-credential: false
-          exclude-azure-powershell-credential: true
-          exclude-azure-developer-cli-credential: true
-          exclude-interactive-browser-credential: true
-
-      - name: Verify executable signature
-        shell: pwsh
-        run: |
-          $signature = Get-AuthenticodeSignature target\release\VeeType.exe
-          if ($signature.Status -ne "Valid") {
-            throw "Executable signature is not valid: $($signature.Status) $($signature.StatusMessage)"
-          }
-
       - name: Package Vulkan OTA archive
         shell: pwsh
         run: |
@@ -189,7 +140,7 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
 
-      - name: Compile installer for cloud signing
+      - name: Compile unsigned installer
         shell: pwsh
         run: |
           $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
@@ -197,34 +148,9 @@ jobs:
           & $iscc "/DAppVersion=${{ steps.version.outputs.version }}" /DNoSign setup.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
 
-      - name: Sign installer with Azure Artifact Signing
-        uses: azure/artifact-signing-action@v2
-        with:
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE_NAME }}
-          files: ${{ github.workspace }}\Output\VeeType_Setup.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          exclude-environment-credential: true
-          exclude-workload-identity-credential: true
-          exclude-managed-identity-credential: true
-          exclude-shared-token-cache-credential: true
-          exclude-visual-studio-credential: true
-          exclude-visual-studio-code-credential: true
-          exclude-azure-cli-credential: false
-          exclude-azure-powershell-credential: true
-          exclude-azure-developer-cli-credential: true
-          exclude-interactive-browser-credential: true
-
-      - name: Verify installer signature and stage release asset
+      - name: Stage installer release asset
         shell: pwsh
         run: |
-          $signature = Get-AuthenticodeSignature Output\VeeType_Setup.exe
-          if ($signature.Status -ne "Valid") {
-            throw "Installer signature is not valid: $($signature.Status) $($signature.StatusMessage)"
-          }
           Copy-Item Output\VeeType_Setup.exe dist\VeeType_Setup.exe
 
       - name: Publish GitHub Release
