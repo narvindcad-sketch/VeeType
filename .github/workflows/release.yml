@@ -127,8 +127,29 @@ jobs:
           }
           "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
 
+      - name: Check out SPIR-V headers
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/SPIRV-Headers
+          ref: 2a9b6f951c7d6b04b6c21fe1bf3f475b68b84801
+          path: deps/SPIRV-Headers
+
+      - name: Install SPIR-V headers CMake package
+        shell: pwsh
+        run: |
+          $prefix = "D:\spirv-headers"
+          cmake -S deps\SPIRV-Headers -B "$env:RUNNER_TEMP\spirv-headers-build" `
+            -DSPIRV_HEADERS_ENABLE_TESTS=OFF "-DCMAKE_INSTALL_PREFIX=$prefix"
+          if ($LASTEXITCODE -ne 0) { throw "SPIRV-Headers CMake configuration failed" }
+          cmake --install "$env:RUNNER_TEMP\spirv-headers-build" --config Release
+          if ($LASTEXITCODE -ne 0) { throw "SPIRV-Headers installation failed" }
+          $packageConfig = Join-Path $prefix "share\cmake\SPIRV-Headers\SPIRV-HeadersConfig.cmake"
+          if (-not (Test-Path $packageConfig)) { throw "SPIRV-Headers CMake package was not installed" }
+
       - name: Build Vulkan-enabled release
         run: cargo build --release --locked --features vulkan --target-dir D:\t
+        env:
+          CMAKE_PREFIX_PATH: D:\spirv-headers
 
       - name: Package Vulkan OTA archive
         shell: pwsh
