@@ -450,15 +450,38 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
         None
     };
 
-    let ctx_params = WhisperContextParameters::default();
     let whisper_model_path = app_dir.join("Models/ggml-base.bin");
-    let whisper_ctx =
-        WhisperContext::new_with_params(&whisper_model_path, ctx_params).map_err(|error| {
-            anyhow::anyhow!(
+    let ctx_params = WhisperContextParameters::default();
+    let whisper_ctx = match WhisperContext::new_with_params(&whisper_model_path, ctx_params) {
+        Ok(context) => {
+            if cfg!(feature = "vulkan") {
+                tracing::info!("Whisper model loaded with Vulkan support enabled");
+            }
+            context
+        }
+        Err(gpu_error) if cfg!(feature = "vulkan") => {
+            tracing::warn!(
+                error = %gpu_error,
+                "Whisper GPU initialization failed; retrying with CPU inference"
+            );
+            let mut cpu_params = WhisperContextParameters::default();
+            cpu_params.use_gpu(false);
+            WhisperContext::new_with_params(&whisper_model_path, cpu_params).map_err(
+                |cpu_error| {
+                    anyhow::anyhow!(
+                        "Failed to load Whisper model {} with GPU ({gpu_error}) and CPU fallback ({cpu_error})",
+                        whisper_model_path.display()
+                    )
+                },
+            )?
+        }
+        Err(error) => {
+            return Err(anyhow::anyhow!(
                 "Failed to load Whisper model {}: {error}",
                 whisper_model_path.display()
-            )
-        })?;
+            ));
+        }
+    };
     let mut whisper_state = whisper_ctx
         .create_state()
         .context("Failed to initialize Whisper transcription state")?;

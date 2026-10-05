@@ -12,20 +12,33 @@ use crate::utils::hotkey::{is_valid_hotkey, pressed_hotkey};
 
 pub fn run(app_dir: PathBuf) -> anyhow::Result<()> {
     let config = load_config(&app_dir)?;
+    let logo = image::load_from_memory(include_bytes!("../../icon.ico"))
+        .context("Could not decode the VeeType application icon")?
+        .into_rgba8();
+    let (logo_width, logo_height) = logo.dimensions();
+    let logo_pixels = logo.into_raw();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("VeeType Settings")
-            .with_inner_size([700.0, 720.0])
-            .with_min_inner_size([520.0, 500.0]),
+            .with_title("VeeType | Settings")
+            .with_inner_size([760.0, 780.0])
+            .with_min_inner_size([560.0, 560.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "VeeType Settings",
+        "VeeType | Settings",
         options,
         Box::new(move |creation_context| {
-            creation_context.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(SettingsApp::new(app_dir, config)))
+            configure_visuals(&creation_context.egui_ctx);
+            let logo = creation_context.egui_ctx.load_texture(
+                "veetype-app-icon",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [logo_width as usize, logo_height as usize],
+                    &logo_pixels,
+                ),
+                egui::TextureOptions::LINEAR,
+            );
+            Ok(Box::new(SettingsApp::new(app_dir, config, logo)))
         }),
     )
     .map_err(|error| anyhow::anyhow!("VeeType Settings window failed: {error}"))
@@ -34,6 +47,7 @@ pub fn run(app_dir: PathBuf) -> anyhow::Result<()> {
 struct SettingsApp {
     app_dir: PathBuf,
     models_dir: PathBuf,
+    logo: egui::TextureHandle,
     config: AppConfig,
     provider: String,
     model: String,
@@ -59,7 +73,7 @@ struct SettingsApp {
 }
 
 impl SettingsApp {
-    fn new(app_dir: PathBuf, config: AppConfig) -> Self {
+    fn new(app_dir: PathBuf, config: AppConfig, logo: egui::TextureHandle) -> Self {
         let (update_tx, update_rx) = mpsc::channel();
         let (license_tx, license_rx) = mpsc::channel();
         let license_signed_in = match LicenseManager::has_session() {
@@ -101,6 +115,7 @@ impl SettingsApp {
         Self {
             app_dir,
             models_dir,
+            logo,
             config,
             provider,
             model,
@@ -225,75 +240,82 @@ impl SettingsApp {
     }
 
     fn render_models(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Local models");
-        ui.label("Whisper and GGUF model files in the application Models folder:");
+        section(ui, "Local models", |ui| {
+            ui.label("Whisper and GGUF model files in the application Models folder:");
 
-        match model_files(&self.models_dir) {
-            Ok(files) if files.is_empty() => {
-                ui.colored_label(egui::Color32::YELLOW, "No model files found.");
-            }
-            Ok(files) => {
-                for file in files {
-                    ui.label(file);
+            match model_files(&self.models_dir) {
+                Ok(files) if files.is_empty() => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(157, 105, 24),
+                        "No model files found.",
+                    );
+                }
+                Ok(files) => {
+                    for file in files {
+                        ui.label(file);
+                    }
+                }
+                Err(error) => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(186, 56, 64),
+                        format!("Could not list model files: {error:#}"),
+                    );
                 }
             }
-            Err(error) => {
-                ui.colored_label(
-                    egui::Color32::LIGHT_RED,
-                    format!("Could not list model files: {error:#}"),
-                );
-            }
-        }
 
-        if ui.button("Import GGUF model...").clicked() {
-            self.import_model();
-        }
+            if ui.button("Import GGUF model...").clicked() {
+                self.import_model();
+            }
+        });
     }
 
     fn render_provider(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Text polishing provider");
-        egui::ComboBox::from_label("Provider")
-            .selected_text(&self.provider)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.provider, "local".to_string(), "local");
-                ui.add_enabled_ui(self.license_entitlements.cloud_providers, |ui| {
-                    for provider in ["groq", "openai"] {
-                        ui.selectable_value(&mut self.provider, provider.to_string(), provider);
-                    }
+        section(ui, "Text polishing", |ui| {
+            egui::ComboBox::from_label("Provider")
+                .selected_text(&self.provider)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.provider, "local".to_string(), "local");
+                    ui.add_enabled_ui(self.license_entitlements.cloud_providers, |ui| {
+                        for provider in ["groq", "openai"] {
+                            ui.selectable_value(&mut self.provider, provider.to_string(), provider);
+                        }
+                    });
                 });
+            if !self.license_entitlements.cloud_providers {
+                ui.label("Cloud providers require an active Pro license.");
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Model override");
+                ui.text_edit_singleline(&mut self.model);
             });
-        if !self.license_entitlements.cloud_providers {
-            ui.label("Cloud providers require an active Pro license.");
-        }
-        ui.horizontal(|ui| {
-            ui.label("Model override");
-            ui.text_edit_singleline(&mut self.model);
-        });
-        ui.label("Leave the model override blank to use the provider default.");
+            ui.label("Leave the model override blank to use the provider default.");
 
-        egui::CollapsingHeader::new("Cloud API credentials")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label("Credentials are stored in Windows Credential Manager, not config.toml.");
-                ui.horizontal(|ui| {
-                    ui.label("Groq API key");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.groq_key)
-                            .password(true)
-                            .hint_text("Enter a new key to replace the stored key"),
+            egui::CollapsingHeader::new("Cloud API credentials")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(
+                        "Credentials are stored in Windows Credential Manager, not config.toml.",
                     );
+                    ui.horizontal(|ui| {
+                        ui.label("Groq API key");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.groq_key)
+                                .password(true)
+                                .hint_text("Enter a new key to replace the stored key"),
+                        );
+                    });
+                    ui.checkbox(&mut self.remove_groq_key, "Remove stored Groq key");
+                    ui.horizontal(|ui| {
+                        ui.label("OpenAI API key");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.openai_key)
+                                .password(true)
+                                .hint_text("Enter a new key to replace the stored key"),
+                        );
+                    });
+                    ui.checkbox(&mut self.remove_openai_key, "Remove stored OpenAI key");
                 });
-                ui.checkbox(&mut self.remove_groq_key, "Remove stored Groq key");
-                ui.horizontal(|ui| {
-                    ui.label("OpenAI API key");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.openai_key)
-                            .password(true)
-                            .hint_text("Enter a new key to replace the stored key"),
-                    );
-                });
-                ui.checkbox(&mut self.remove_openai_key, "Remove stored OpenAI key");
-            });
+        });
     }
 
     fn capture_hotkey_if_pressed(&mut self) {
@@ -343,193 +365,290 @@ impl eframe::App for SettingsApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("VeeType Settings");
-            ui.label("Changes are saved locally and apply after restarting VeeType.");
-            ui.separator();
-
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("VeeType Pro account");
-                ui.label(&self.license_status);
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(248, 247, 244))
+                    .inner_margin(egui::Margin::same(20.0)),
+            )
+            .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Email");
-                    ui.text_edit_singleline(&mut self.license_email);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Password");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.license_password)
-                            .password(true),
+                    ui.image((self.logo.id(), egui::vec2(52.0, 52.0)));
+                    ui.vertical(|ui| {
+                        ui.heading(
+                            egui::RichText::new("VeeType")
+                                .size(27.0)
+                                .strong()
+                                .color(egui::Color32::from_rgb(21, 21, 33)),
+                        );
+                        ui.label(
+                            egui::RichText::new("Your voice. Beautifully written.")
+                                .color(egui::Color32::from_rgb(116, 116, 127)),
+                        );
+                    });
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "VERSION {}",
+                                    env!("CARGO_PKG_VERSION")
+                                ))
+                                .small()
+                                .strong()
+                                .color(egui::Color32::from_rgb(84, 70, 223)),
+                            );
+                        },
                     );
                 });
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.license_busy, egui::Button::new("Sign in"))
-                        .clicked()
-                    {
-                        self.start_license_action(false);
-                    }
-                    if ui
-                        .add_enabled(!self.license_busy, egui::Button::new("Create account"))
-                        .clicked()
-                    {
-                        self.start_license_action(true);
-                    }
-                    if ui
-                        .add_enabled(!self.license_busy, egui::Button::new("Refresh license"))
-                        .clicked()
-                    {
-                        self.refresh_license();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.license_busy && self.license_signed_in,
-                            egui::Button::new("Subscribe / renew"),
-                        )
-                        .clicked()
-                    {
-                        self.open_checkout();
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.license_busy && self.license_signed_in,
-                            egui::Button::new("Sign out"),
-                        )
-                        .clicked()
-                    {
-                        match LicenseManager::sign_out() {
-                            Ok(()) => {
-                                self.license_entitlements = Entitlements::default();
-                                self.license_status =
-                                    "Signed out. Restart VeeType to disable Pro features.".into();
-                            }
-                            Err(error) => {
-                                self.license_status = format!("Could not sign out: {error:#}");
+                ui.add_space(18.0);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                section(ui, "Your VeeType account", |ui| {
+                    ui.label(&self.license_status);
+                    ui.horizontal(|ui| {
+                        ui.label("Email");
+                        ui.text_edit_singleline(&mut self.license_email);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Password");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.license_password).password(true),
+                        );
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(!self.license_busy, egui::Button::new("Sign in"))
+                            .clicked()
+                        {
+                            self.start_license_action(false);
+                        }
+                        if ui
+                            .add_enabled(!self.license_busy, egui::Button::new("Create account"))
+                            .clicked()
+                        {
+                            self.start_license_action(true);
+                        }
+                        if ui
+                            .add_enabled(!self.license_busy, egui::Button::new("Refresh license"))
+                            .clicked()
+                        {
+                            self.refresh_license();
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.license_busy && self.license_signed_in,
+                                egui::Button::new("Subscribe / renew"),
+                            )
+                            .clicked()
+                        {
+                            self.open_checkout();
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.license_busy && self.license_signed_in,
+                                egui::Button::new("Sign out"),
+                            )
+                            .clicked()
+                        {
+                            match LicenseManager::sign_out() {
+                                Ok(()) => {
+                                    self.license_entitlements = Entitlements::default();
+                                    self.license_status =
+                                        "Signed out. Restart VeeType to disable Pro features."
+                                            .into();
+                                }
+                                Err(error) => {
+                                    self.license_status =
+                                        format!("Could not sign out: {error:#}");
+                                }
                             }
                         }
-                    }
-                });
-                ui.label("An active Pro subscription unlocks cloud providers, hands-free mode, and larger local models. Local basic dictation remains free.");
-                ui.separator();
-
-                ui.heading("Dictation");
-                ui.horizontal(|ui| {
-                    ui.label(format!("Hotkey: {}", self.config.settings.hotkey));
-                    if ui
-                        .button(if self.capture_hotkey {
-                            "Press a key..."
-                        } else {
-                            "Bind hotkey"
-                        })
-                        .clicked()
-                    {
-                        self.capture_hotkey = true;
-                    }
-                    if self.capture_hotkey && ui.button("Cancel").clicked() {
-                        self.capture_hotkey = false;
-                    }
+                    });
+                    ui.label("Pro unlocks cloud providers, hands-free mode, and larger local models. Basic local dictation stays free.");
                 });
 
-                let selected_device = self
-                    .config
-                    .settings
-                    .input_device
-                    .clone()
-                    .unwrap_or_else(|| "System default".to_string());
-                egui::ComboBox::from_label("Microphone")
-                    .selected_text(selected_device)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.config.settings.input_device,
-                            None,
-                            "System default",
-                        );
-                        for device in &self.input_devices {
-                            ui.selectable_value(
-                                &mut self.config.settings.input_device,
-                                Some(device.clone()),
-                                device,
-                            );
+                section(ui, "Dictation", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Hotkey: {}", self.config.settings.hotkey));
+                        if ui
+                            .button(if self.capture_hotkey {
+                                "Press a key..."
+                            } else {
+                                "Bind hotkey"
+                            })
+                            .clicked()
+                        {
+                            self.capture_hotkey = true;
+                        }
+                        if self.capture_hotkey && ui.button("Cancel").clicked() {
+                            self.capture_hotkey = false;
                         }
                     });
 
-                ui.add(
-                    egui::Slider::new(&mut self.config.settings.max_tokens, 1..=512)
-                        .text("Maximum polishing tokens"),
-                );
-                ui.add_enabled_ui(self.license_entitlements.hands_free, |ui| {
+                    let selected_device = self
+                        .config
+                        .settings
+                        .input_device
+                        .clone()
+                        .unwrap_or_else(|| "System default".to_string());
+                    egui::ComboBox::from_label("Microphone")
+                        .selected_text(selected_device)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.config.settings.input_device,
+                                None,
+                                "System default",
+                            );
+                            for device in &self.input_devices {
+                                ui.selectable_value(
+                                    &mut self.config.settings.input_device,
+                                    Some(device.clone()),
+                                    device,
+                                );
+                            }
+                        });
+
+                    ui.add(
+                        egui::Slider::new(&mut self.config.settings.max_tokens, 1..=512)
+                            .text("Maximum polishing tokens"),
+                    );
+                    ui.add_enabled_ui(self.license_entitlements.hands_free, |ui| {
+                        ui.checkbox(
+                            &mut self.config.settings.hands_free,
+                            "Hands-free mode (stop after silence)",
+                        );
+                    });
+                    if !self.license_entitlements.hands_free {
+                        ui.label("Hands-free mode requires an active Pro license.");
+                    }
                     ui.checkbox(
-                        &mut self.config.settings.hands_free,
-                        "Hands-free mode (stop after silence)",
+                        &mut self.config.settings.auto_start,
+                        "Start VeeType automatically when I sign in",
+                    );
+                    ui.checkbox(
+                        &mut self.config.settings.translate_to_english,
+                        "Translate recognized speech into English",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Recognition language");
+                        ui.text_edit_singleline(&mut self.config.settings.language);
+                        ui.label("(use “auto” for detection)");
+                    });
+                    ui.add(
+                        egui::Slider::new(
+                            &mut self.config.settings.silence_timeout_ms,
+                            250..=10_000,
+                        )
+                        .text("Silence timeout (ms)"),
                     );
                 });
-                if !self.license_entitlements.hands_free {
-                    ui.label("Hands-free mode requires an active Pro license.");
-                }
-                ui.checkbox(
-                    &mut self.config.settings.auto_start,
-                    "Start VeeType automatically when I sign in",
-                );
-                ui.checkbox(
-                    &mut self.config.settings.translate_to_english,
-                    "Translate recognized speech into English",
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Recognition language");
-                    ui.text_edit_singleline(&mut self.config.settings.language);
-                    ui.label("(use “auto” for detection)");
-                });
-                ui.add(
-                    egui::Slider::new(&mut self.config.settings.silence_timeout_ms, 250..=10_000)
-                        .text("Silence timeout (ms)"),
-                );
 
-                ui.separator();
                 self.render_provider(ui);
-                ui.separator();
                 self.render_models(ui);
 
-                ui.separator();
-                ui.heading("Software updates");
-                ui.horizontal(|ui| {
-                    ui.label(format!("Current version: v{}", env!("CARGO_PKG_VERSION")));
-                    if ui
-                        .add_enabled(
-                            !self.update_checking,
-                            egui::Button::new(if self.update_checking {
-                                "Checking for updates..."
-                            } else {
-                                "Check for updates"
-                            }),
-                        )
-                        .clicked()
-                    {
-                        self.update_status = "Checking GitHub for updates...".into();
-                        self.update_checking = true;
-                        OtaUpdater::check_for_updates_async(self.update_tx.clone(), ctx.clone());
+                section(ui, "Software updates", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Current version: v{}", env!("CARGO_PKG_VERSION")));
+                        if ui
+                            .add_enabled(
+                                !self.update_checking,
+                                egui::Button::new(if self.update_checking {
+                                    "Checking for updates..."
+                                } else {
+                                    "Check for updates"
+                                }),
+                            )
+                            .clicked()
+                        {
+                            self.update_status = "Checking GitHub for updates...".into();
+                            self.update_checking = true;
+                            OtaUpdater::check_for_updates_async(
+                                self.update_tx.clone(),
+                                ctx.clone(),
+                            );
+                        }
+                    });
+                    if !self.update_status.is_empty() {
+                        ui.label(&self.update_status);
                     }
                 });
-                if !self.update_status.is_empty() {
-                    ui.label(&self.update_status);
-                }
 
-                ui.separator();
                 if let Some((success, message)) = &self.status {
                     ui.colored_label(
                         if *success {
-                            egui::Color32::LIGHT_GREEN
+                            egui::Color32::from_rgb(38, 125, 81)
                         } else {
-                            egui::Color32::LIGHT_RED
+                            egui::Color32::from_rgb(186, 56, 64)
                         },
                         message,
                     );
                 }
-                if ui.button("Save settings").clicked() {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("Save settings")
+                                .strong()
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(84, 70, 223)),
+                    )
+                    .clicked()
+                {
                     self.save();
                 }
             });
-        });
+            });
     }
+}
+
+fn section(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::group(ui.style())
+        .fill(egui::Color32::WHITE)
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgb(228, 226, 233),
+        ))
+        .rounding(egui::Rounding::same(12.0))
+        .inner_margin(egui::Margin::same(16.0))
+        .show(ui, |ui| {
+            ui.heading(
+                egui::RichText::new(title)
+                    .strong()
+                    .color(egui::Color32::from_rgb(28, 22, 48)),
+            );
+            ui.add_space(8.0);
+            contents(ui);
+        });
+    ui.add_space(12.0);
+}
+
+fn configure_visuals(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::light();
+    visuals.panel_fill = egui::Color32::from_rgb(248, 247, 244);
+    visuals.window_fill = egui::Color32::WHITE;
+    visuals.extreme_bg_color = egui::Color32::WHITE;
+    visuals.faint_bg_color = egui::Color32::from_rgb(239, 237, 243);
+    visuals.code_bg_color = egui::Color32::from_rgb(239, 237, 243);
+    visuals.window_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(228, 226, 233));
+    visuals.hyperlink_color = egui::Color32::from_rgb(84, 70, 223);
+    visuals.selection.bg_fill = egui::Color32::from_rgb(84, 70, 223);
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
+    visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(21, 21, 33);
+    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(248, 247, 244);
+    visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(21, 21, 33);
+    visuals.widgets.inactive.bg_stroke.color = egui::Color32::from_rgb(228, 226, 233);
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(239, 237, 243);
+    visuals.widgets.hovered.fg_stroke.color = egui::Color32::from_rgb(84, 70, 223);
+    visuals.widgets.hovered.bg_stroke.color = egui::Color32::from_rgb(84, 70, 223);
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(84, 70, 223);
+    visuals.widgets.active.fg_stroke.color = egui::Color32::WHITE;
+    visuals.widgets.active.bg_stroke.color = egui::Color32::from_rgb(84, 70, 223);
+    ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+    style.spacing.button_padding = egui::vec2(14.0, 8.0);
+    ctx.set_style(style);
 }
 
 fn list_input_devices() -> anyhow::Result<Vec<String>> {

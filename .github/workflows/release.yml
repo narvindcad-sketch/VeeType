@@ -122,8 +122,26 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
 
-      - name: Build CPU release
-        run: cargo build --release --locked
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $sdkVersion = "1.3.296.0"
+          $installer = Join-Path $env:RUNNER_TEMP "VulkanSDK-Installer.exe"
+          $downloadUrl = "https://sdk.lunarg.com/sdk/download/$sdkVersion/windows/VulkanSDK-$sdkVersion-Installer.exe"
+          curl.exe --fail --location --retry 3 --retry-all-errors --output $installer $downloadUrl
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK download failed" }
+          $process = Start-Process -FilePath $installer `
+            -ArgumentList @("--accept-licenses", "--default-answer", "--confirm-command", "install") `
+            -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Vulkan SDK installation failed with exit code $($process.ExitCode)" }
+          $sdkPath = "C:\VulkanSDK\$sdkVersion"
+          if (-not (Test-Path (Join-Path $sdkPath "Lib\vulkan-1.lib"))) {
+            throw "Vulkan SDK library was not found under $sdkPath"
+          }
+          "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
+
+      - name: Build Vulkan-enabled release
+        run: cargo build --release --locked --features vulkan
 
       - name: Authenticate to Azure with OIDC
         uses: azure/login@v2
@@ -132,7 +150,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Sign CPU executable with Azure Artifact Signing
+      - name: Sign executable with Azure Artifact Signing
         uses: azure/artifact-signing-action@v2
         with:
           endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
@@ -153,15 +171,15 @@ jobs:
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
 
-      - name: Verify CPU executable signature
+      - name: Verify executable signature
         shell: pwsh
         run: |
           $signature = Get-AuthenticodeSignature target\release\VeeType.exe
           if ($signature.Status -ne "Valid") {
-            throw "CPU executable signature is not valid: $($signature.Status) $($signature.StatusMessage)"
+            throw "Executable signature is not valid: $($signature.Status) $($signature.StatusMessage)"
           }
 
-      - name: Package CPU OTA archive
+      - name: Package Vulkan OTA archive
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
@@ -171,7 +189,7 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
 
-      - name: Compile CPU installer for cloud signing
+      - name: Compile installer for cloud signing
         shell: pwsh
         run: |
           $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
@@ -209,64 +227,11 @@ jobs:
           }
           Copy-Item Output\VeeType_Setup.exe dist\VeeType_Setup.exe
 
-      - name: Install CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.17
-        with:
-          cuda: "12.4.1"
-
-      - name: Build CUDA release
-        run: cargo build --release --locked --features cuda
-
-      - name: Sign CUDA executable with Azure Artifact Signing
-        uses: azure/artifact-signing-action@v2
-        with:
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE_NAME }}
-          files: ${{ github.workspace }}\target\release\VeeType.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          exclude-environment-credential: true
-          exclude-workload-identity-credential: true
-          exclude-managed-identity-credential: true
-          exclude-shared-token-cache-credential: true
-          exclude-visual-studio-credential: true
-          exclude-visual-studio-code-credential: true
-          exclude-azure-cli-credential: false
-          exclude-azure-powershell-credential: true
-          exclude-azure-developer-cli-credential: true
-          exclude-interactive-browser-credential: true
-
-      - name: Verify CUDA executable signature
-        shell: pwsh
-        run: |
-          $signature = Get-AuthenticodeSignature target\release\VeeType.exe
-          if ($signature.Status -ne "Valid") {
-            throw "CUDA executable signature is not valid: $($signature.Status) $($signature.StatusMessage)"
-          }
-
-      - name: Package CUDA distribution
-        shell: pwsh
-        run: |
-          $cudaBin = Join-Path $env:CUDA_PATH "bin"
-          $cudaStage = Join-Path $env:GITHUB_WORKSPACE "dist\cuda"
-          New-Item -ItemType Directory -Force -Path $cudaStage | Out-Null
-          Copy-Item target\release\VeeType.exe $cudaStage\VeeType.exe
-          Copy-Item Models $cudaStage\Models -Recurse
-          foreach ($dll in @("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll")) {
-            $source = Join-Path $cudaBin $dll
-            if (-not (Test-Path $source)) { throw "CUDA runtime dependency is missing: $source" }
-            Copy-Item $source $cudaStage\$dll
-          }
-          Compress-Archive -Path "$cudaStage\*" -DestinationPath dist\VeeType-CUDA.zip -Force
-
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/VeeType-x86_64-pc-windows-msvc.zip
             dist/VeeType_Setup.exe
-            dist/VeeType-CUDA.zip
           generate_release_notes: true
           fail_on_unmatched_files: true

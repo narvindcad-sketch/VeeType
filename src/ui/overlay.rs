@@ -24,9 +24,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-const WINDOW_WIDTH: i32 = 270;
-const WINDOW_HEIGHT: i32 = 58;
-const VISIBLE_ALPHA: f32 = 238.0;
+const WINDOW_WIDTH: i32 = 336;
+const WINDOW_HEIGHT: i32 = 78;
+const VISIBLE_ALPHA: f32 = 246.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OverlayState {
@@ -38,17 +38,25 @@ pub enum OverlayState {
 impl OverlayState {
     fn label(self) -> &'static str {
         match self {
-            Self::Idle => "Ready  |  Right Alt",
-            Self::Listening => "Listening...",
-            Self::Processing => "Polishing text...",
+            Self::Idle => "Ready when you are",
+            Self::Listening => "Listening to your voice",
+            Self::Processing => "Polishing your text",
+        }
+    }
+
+    fn indicator(self) -> &'static str {
+        match self {
+            Self::Idle => "READY",
+            Self::Listening => "LIVE",
+            Self::Processing => "REFINING",
         }
     }
 
     fn accent(self) -> u32 {
         match self {
-            Self::Idle => rgb(148, 163, 184),
-            Self::Listening => rgb(99, 102, 241),
-            Self::Processing => rgb(139, 92, 246),
+            Self::Idle => rgb(165, 156, 184),
+            Self::Listening => rgb(126, 109, 255),
+            Self::Processing => rgb(166, 135, 255),
         }
     }
 }
@@ -140,7 +148,7 @@ impl Overlay {
 
 fn create_window() -> anyhow::Result<HWND> {
     let class_name = wide("VeeTypeOverlay");
-    let window_title = wide(OverlayState::Listening.label());
+    let window_title = wide("VeeType");
 
     unsafe {
         let instance = GetModuleHandleW(null());
@@ -192,7 +200,7 @@ fn create_window() -> anyhow::Result<HWND> {
             ));
         }
 
-        let region = CreateRoundRectRgn(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 28, 28);
+        let region = CreateRoundRectRgn(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 38, 38);
         if region != 0 && SetWindowRgn(hwnd, region, 1) == 0 {
             DeleteObject(region);
             return Err(anyhow!(
@@ -375,43 +383,58 @@ unsafe fn paint_window(hwnd: HWND) {
 
     let previous_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
     let visual = VISUAL_STATE.with(|state| *state.borrow());
-    let background = CreateSolidBrush(rgb(14, 14, 18));
+    let background = CreateSolidBrush(rgb(23, 20, 31));
     if background != 0 {
         FillRect(hdc, &bounds, background);
     }
 
-    let outer_glow = CreateSolidBrush(rgb(20, 19, 34));
+    let outer_glow = CreateSolidBrush(rgb(37, 30, 57));
     if outer_glow != 0 {
         let previous_brush = SelectObject(hdc, outer_glow);
-        Ellipse(hdc, 18, 4, 86, 54);
+        Ellipse(hdc, 6, 6, 84, 72);
         SelectObject(hdc, previous_brush);
         DeleteObject(outer_glow);
     }
-    let inner_glow = CreateSolidBrush(rgb(25, 23, 45));
-    if inner_glow != 0 {
-        let previous_brush = SelectObject(hdc, inner_glow);
-        Ellipse(hdc, 25, 8, 79, 50);
+
+    let logo_tile = CreateSolidBrush(rgb(84, 70, 223));
+    if logo_tile != 0 {
+        let previous_brush = SelectObject(hdc, logo_tile);
+        RoundRect(hdc, 17, 13, 67, 65, 18, 18);
         SelectObject(hdc, previous_brush);
-        DeleteObject(inner_glow);
+        DeleteObject(logo_tile);
+    }
+
+    let logo_mark = CreateSolidBrush(rgb(245, 242, 255));
+    if logo_mark != 0 {
+        let previous_brush = SelectObject(hdc, logo_mark);
+        let mark_heights = [10, 21, 15, 24, 12];
+        for (index, height) in mark_heights.iter().enumerate() {
+            let x = 27 + index as i32 * 6;
+            RoundRect(hdc, x, 39 - height / 2, x + 3, 39 + height / 2, 3, 3);
+        }
+        SelectObject(hdc, previous_brush);
+        DeleteObject(logo_mark);
     }
 
     match visual.state {
         OverlayState::Listening => {
-            let pulse = visual.phase.sin().abs() * 0.2;
-            let dynamic_volume = (visual.volume * 15.0).max(pulse);
-            let base_heights = [8.0_f32, 16.0, 10.0, 18.0];
+            let pulse = visual.phase.sin().abs() * 0.25;
+            let dynamic_volume = (visual.volume * 14.0).max(pulse);
+            let base_heights = [8.0_f32, 15.0, 10.0, 19.0, 12.0, 17.0, 8.0];
             for (index, base_height) in base_heights.iter().enumerate() {
-                let height = (base_height * (0.5 + dynamic_volume)).clamp(4.0, 24.0) as i32;
-                let x = 34 + index as i32 * 9;
+                let wave = ((visual.phase + index as f32 * 0.8).sin() + 1.0) * 0.5;
+                let height =
+                    (base_height * (0.35 + dynamic_volume + wave * 0.45)).clamp(4.0, 28.0) as i32;
+                let x = 268 + index as i32 * 7;
                 let color = if index % 2 == 0 {
-                    rgb(99, 102, 241)
+                    rgb(126, 109, 255)
                 } else {
-                    rgb(139, 92, 246)
+                    rgb(181, 163, 255)
                 };
                 let brush = CreateSolidBrush(color);
                 if brush != 0 {
                     let previous_brush = SelectObject(hdc, brush);
-                    RoundRect(hdc, x, 29 - height / 2, x + 4, 29 + height / 2, 4, 4);
+                    RoundRect(hdc, x, 39 - height / 2, x + 4, 39 + height / 2, 4, 4);
                     SelectObject(hdc, previous_brush);
                     DeleteObject(brush);
                 }
@@ -420,57 +443,103 @@ unsafe fn paint_window(hwnd: HWND) {
         OverlayState::Processing => {
             let pulse = (visual.phase.sin() + 1.0) * 0.5;
             let radius = 4.0 + pulse * 3.0;
-            let glow = CreateSolidBrush(rgb(42, 34, 76));
+            let glow = CreateSolidBrush(rgb(70, 51, 112));
             if glow != 0 {
                 let previous_brush = SelectObject(hdc, glow);
                 Ellipse(
                     hdc,
-                    51 - (radius + 7.0) as i32,
-                    29 - (radius + 7.0) as i32,
-                    51 + (radius + 7.0) as i32,
-                    29 + (radius + 7.0) as i32,
+                    290 - (radius + 7.0) as i32,
+                    39 - (radius + 7.0) as i32,
+                    290 + (radius + 7.0) as i32,
+                    39 + (radius + 7.0) as i32,
                 );
                 SelectObject(hdc, previous_brush);
                 DeleteObject(glow);
             }
-            let brush = CreateSolidBrush(rgb(139, 92, 246));
+            let brush = CreateSolidBrush(rgb(181, 163, 255));
             if brush != 0 {
                 let previous_brush = SelectObject(hdc, brush);
                 Ellipse(
                     hdc,
-                    51 - radius as i32,
-                    29 - radius as i32,
-                    51 + radius as i32,
-                    29 + radius as i32,
+                    290 - radius as i32,
+                    39 - radius as i32,
+                    290 + radius as i32,
+                    39 + radius as i32,
                 );
                 SelectObject(hdc, previous_brush);
                 DeleteObject(brush);
+            }
+            for (index, x) in [270, 310].iter().enumerate() {
+                let dot_radius = 3 + ((visual.phase + index as f32).sin().abs() * 2.0) as i32;
+                let brush = CreateSolidBrush(rgb(126, 109, 255));
+                if brush != 0 {
+                    let previous_brush = SelectObject(hdc, brush);
+                    Ellipse(
+                        hdc,
+                        *x - dot_radius,
+                        39 - dot_radius,
+                        *x + dot_radius,
+                        39 + dot_radius,
+                    );
+                    SelectObject(hdc, previous_brush);
+                    DeleteObject(brush);
+                }
             }
         }
         OverlayState::Idle => {
             let brush = CreateSolidBrush(visual.state.accent());
             if brush != 0 {
                 let previous_brush = SelectObject(hdc, brush);
-                Ellipse(hdc, 23, 22, 37, 36);
+                Ellipse(hdc, 283, 32, 297, 46);
                 SelectObject(hdc, previous_brush);
                 DeleteObject(brush);
             }
         }
     }
     SetBkMode(hdc, TRANSPARENT as i32);
-    SetTextColor(hdc, rgb(244, 244, 245));
-    let title = wide(visual.state.label());
-    let mut text_bounds = RECT {
-        left: 94,
-        top: 0,
-        right: WINDOW_WIDTH - 20,
-        bottom: WINDOW_HEIGHT,
+    SetTextColor(hdc, rgb(255, 248, 255));
+    let brand = wide("VeeType");
+    let mut brand_bounds = RECT {
+        left: 83,
+        top: 9,
+        right: 246,
+        bottom: 41,
     };
     DrawTextW(
         hdc,
-        title.as_ptr(),
+        brand.as_ptr(),
+        "VeeType".encode_utf16().count() as i32,
+        &mut brand_bounds,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    SetTextColor(hdc, rgb(196, 185, 211));
+    let status = wide(visual.state.label());
+    let mut status_bounds = RECT {
+        left: 83,
+        top: 37,
+        right: 253,
+        bottom: 68,
+    };
+    DrawTextW(
+        hdc,
+        status.as_ptr(),
         visual.state.label().encode_utf16().count() as i32,
-        &mut text_bounds,
+        &mut status_bounds,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    SetTextColor(hdc, visual.state.accent());
+    let indicator = wide(visual.state.indicator());
+    let mut indicator_bounds = RECT {
+        left: 258,
+        top: 59,
+        right: WINDOW_WIDTH - 17,
+        bottom: 74,
+    };
+    DrawTextW(
+        hdc,
+        indicator.as_ptr(),
+        visual.state.indicator().encode_utf16().count() as i32,
+        &mut indicator_bounds,
         DT_LEFT | DT_VCENTER | DT_SINGLELINE,
     );
     SelectObject(hdc, previous_pen);

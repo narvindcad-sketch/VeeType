@@ -1,6 +1,6 @@
 [package]
 name = "VeeType"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [dependencies]
@@ -9,7 +9,7 @@ cpal = "0.15.3"
 ringbuf = "0.3.3"
 anyhow = "1.0"
 
-# Whisper AI bindings
+# Whisper AI bindings with optional cross-vendor Vulkan acceleration.
 whisper-rs = "0.16"
 
 keyring = "2"
@@ -43,7 +43,7 @@ base64 = "0.22"
 ed25519-dalek = "2"
 
 [features]
-cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan", "whisper-rs/vulkan"]
 
 [profile.release]
 opt-level = 3
