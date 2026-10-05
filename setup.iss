@@ -22,7 +22,7 @@ OutputBaseFilename=VeeType_Setup
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
-ArchitecturesInstallAllowed=x64compatible
+ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 SetupLogging=yes
 
