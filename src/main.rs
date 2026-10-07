@@ -477,7 +477,13 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
     tracing::info!("Dictation engine starting");
 
     let mut local_llm = if effective_provider.eq_ignore_ascii_case("local") {
-        Some(LocalLlm::load(&app_dir, entitlements.large_models)?)
+        match LocalLlm::load(&app_dir, entitlements.large_models) {
+            Ok(llm) => Some(llm),
+            Err(error) => {
+                tracing::warn!(error = %error, "Local polishing model unavailable; typing raw transcripts");
+                None
+            }
+        }
     } else {
         tracing::info!(
             provider = effective_provider,
@@ -496,6 +502,21 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
         );
         app_dir.join("Models/ggml-base.bin")
     };
+    // The installer ships no models; wait for the setup wizard to download one.
+    if !whisper_model_path.is_file() {
+        tracing::warn!(
+            model = %whisper_model_path.display(),
+            "No Whisper model installed yet; waiting for a download from VeeType Settings"
+        );
+        while !whisper_model_path.is_file() {
+            if pump_windows_messages() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        // Let the finished download settle before loading it.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
     let ctx_params = WhisperContextParameters::default();
     let whisper_ctx = match WhisperContext::new_with_params(&whisper_model_path, ctx_params) {
         Ok(context) => {
@@ -771,21 +792,30 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
             let mut generated_text = if profile.is_some_and(|profile| !profile.polish) {
                 normalized_raw.clone()
             } else if let Some(cloud_llm) = cloud_llm.as_ref() {
-                cloud_llm.polish(
-                    config.settings.max_tokens,
-                    system_instruction,
-                    &normalized_raw,
-                )?
+                cloud_llm
+                    .polish(
+                        config.settings.max_tokens,
+                        system_instruction,
+                        &normalized_raw,
+                    )
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(error = %error, "Cloud polishing failed; typing the raw transcript");
+                        normalized_raw.clone()
+                    })
+            } else if let Some(local_llm) = local_llm.as_mut() {
+                local_llm
+                    .polish(
+                        &app_dir,
+                        config.settings.max_tokens,
+                        system_instruction,
+                        &normalized_raw,
+                    )
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(error = %error, "Local polishing failed; typing the raw transcript");
+                        normalized_raw.clone()
+                    })
             } else {
-                let local_llm = local_llm
-                    .as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("The local LLM is not loaded"))?;
-                local_llm.polish(
-                    &app_dir,
-                    config.settings.max_tokens,
-                    system_instruction,
-                    &normalized_raw,
-                )?
+                normalized_raw.clone()
             };
             tracing::info!(
                 provider = effective_provider,

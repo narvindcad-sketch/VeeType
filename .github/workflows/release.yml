@@ -84,29 +84,6 @@ jobs:
             }
           }
 
-      - name: Download pinned model assets
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path Models | Out-Null
-          curl.exe --fail --location --retry 3 --retry-all-errors `
-            --output Models\ggml-base.bin `
-            https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin?download=true
-          if ($LASTEXITCODE -ne 0) { throw "Whisper model download failed" }
-          curl.exe --fail --location --retry 3 --retry-all-errors `
-            --output Models\qwen2.5-0.5b-instruct-q4_k_m.gguf `
-            https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true
-          if ($LASTEXITCODE -ne 0) { throw "Qwen model download failed" }
-          curl.exe --fail --location --retry 3 --retry-all-errors `
-            --output Models\QWEN-LICENSE.txt `
-            https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/LICENSE?download=true
-          if ($LASTEXITCODE -ne 0) { throw "Qwen model license download failed" }
-          curl.exe --fail --location --retry 3 --retry-all-errors `
-            --output Models\WHISPER-LICENSE.txt `
-            https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/LICENSE
-          if ($LASTEXITCODE -ne 0) { throw "Whisper model license download failed" }
-          if ((Get-Item Models\ggml-base.bin).Length -lt 100MB) { throw "Downloaded Whisper model is incomplete" }
-          if ((Get-Item Models\qwen2.5-0.5b-instruct-q4_k_m.gguf).Length -lt 300MB) { throw "Downloaded Qwen model is incomplete" }
-
       - name: Run Rust tests
         run: cargo test --locked
 

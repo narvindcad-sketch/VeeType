@@ -37,7 +37,10 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "target\release\VeeType.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "config.example.toml"; DestDir: "{app}"; DestName: "config.toml"; Flags: onlyifdoesntexist
-Source: "Models\*"; DestDir: "{app}\Models"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+
+[Dirs]
+Name: "{app}\Models"
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\VeeType.exe"; IconFilename: "{app}\icon.ico"; Check: not IsPortable
