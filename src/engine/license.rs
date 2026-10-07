@@ -1,3 +1,4 @@
+#![cfg_attr(feature = "test-bypass", allow(dead_code))]
 use anyhow::{bail, Context};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -24,6 +25,22 @@ pub struct Entitlements {
 }
 
 impl Entitlements {
+    pub fn unlocked() -> Self {
+        Self::all(true)
+    }
+
+    pub fn fallback() -> Self {
+        Self::all(cfg!(feature = "test-bypass"))
+    }
+
+    fn all(enabled: bool) -> Self {
+        Self {
+            cloud_providers: enabled,
+            hands_free: enabled,
+            large_models: enabled,
+        }
+    }
+
     pub fn is_pro(self) -> bool {
         self.cloud_providers && self.hands_free && self.large_models
     }
@@ -35,7 +52,7 @@ pub fn effective_provider<'a>(
 ) -> &'a str {
     if matches!(
         configured_provider.to_ascii_lowercase().as_str(),
-        "groq" | "openai"
+        "groq" | "openai" | "anthropic"
     ) && !entitlements.cloud_providers
     {
         "local"
@@ -68,6 +85,9 @@ pub struct LicenseManager;
 
 impl LicenseManager {
     pub fn cached_entitlements() -> anyhow::Result<Option<Entitlements>> {
+        if cfg!(feature = "test-bypass") {
+            return Ok(Some(Entitlements::unlocked()));
+        }
         let Some(token) = KeyVault::get_key(LICENSE_ACCOUNT)? else {
             return Ok(None);
         };

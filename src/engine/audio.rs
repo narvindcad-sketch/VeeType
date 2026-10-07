@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use ringbuf::{HeapConsumer, HeapRb};
+use nnnoiseless::DenoiseState;
 use webrtc_vad::{SampleRate, Vad, VadMode};
 use whisper_rs::{FullParams, SamplingStrategy};
 
@@ -27,6 +28,29 @@ pub struct AudioCapture {
     voice_hangover_frames: usize,
     silence_samples: usize,
     speech_detected: bool,
+    denoiser: Option<Box<DenoiseState<'static>>>,
+}
+
+/// RNNoise runs at 48 kHz on 480-sample frames; our 16 kHz frames are upsampled 3x,
+/// denoised in 10 ms chunks, then averaged back down.
+fn denoise_frame(denoiser: &mut DenoiseState<'static>, frame: &mut [f32]) {
+    const SCALE: f32 = 32768.0;
+    let mut input = [0.0_f32; DenoiseState::FRAME_SIZE];
+    let mut output = [0.0_f32; DenoiseState::FRAME_SIZE];
+    for chunk in frame.chunks_exact_mut(DenoiseState::FRAME_SIZE / 3) {
+        for (i, slot) in input.iter_mut().enumerate() {
+            let position = i as f32 / 3.0;
+            let low = position as usize;
+            let high = (low + 1).min(chunk.len() - 1);
+            let fraction = position - low as f32;
+            *slot = (chunk[low] * (1.0 - fraction) + chunk[high] * fraction) * SCALE;
+        }
+        denoiser.process_frame(&mut output, &input);
+        for (i, sample) in chunk.iter_mut().enumerate() {
+            let triple = &output[i * 3..i * 3 + 3];
+            *sample = (triple.iter().sum::<f32>() / 3.0 / SCALE).clamp(-1.0, 1.0);
+        }
+    }
 }
 
 impl AudioCapture {
@@ -36,6 +60,7 @@ impl AudioCapture {
         sample_format: cpal::SampleFormat,
         native_sample_rate: u32,
         channels: usize,
+        noise_suppression: bool,
     ) -> anyhow::Result<Self> {
         let ring_buffer = HeapRb::<f32>::new(16_000 * 60);
         let (mut producer, consumer) = ring_buffer.split();
@@ -76,6 +101,7 @@ impl AudioCapture {
             voice_hangover_frames: 0,
             silence_samples: 0,
             speech_detected: false,
+            denoiser: noise_suppression.then(DenoiseState::new),
         })
     }
 
@@ -90,10 +116,13 @@ impl AudioCapture {
                 continue;
             }
 
-            let frame = std::mem::replace(
+            let mut frame = std::mem::replace(
                 &mut self.pending_frame,
                 Vec::with_capacity(VAD_FRAME_SAMPLES),
             );
+            if let Some(denoiser) = self.denoiser.as_mut() {
+                denoise_frame(denoiser, &mut frame);
+            }
             let pcm_frame: Vec<i16> = frame
                 .iter()
                 .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
@@ -308,4 +337,16 @@ pub fn transcribe_media_file(
         .spawn()
         .context("Transcript was saved, but Notepad could not be opened")?;
     Ok(transcript_path)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn denoiser_preserves_frame_length_and_range() {
+        let mut denoiser = nnnoiseless::DenoiseState::new();
+        let mut frame: Vec<f32> = (0..480).map(|i| ((i as f32) * 0.1).sin() * 0.3).collect();
+        super::denoise_frame(&mut denoiser, &mut frame);
+        assert_eq!(frame.len(), 480);
+        assert!(frame.iter().all(|s| s.is_finite() && s.abs() <= 1.0));
+    }
 }

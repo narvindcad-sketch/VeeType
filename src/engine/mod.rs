@@ -2,8 +2,10 @@
 
 pub mod audio;
 pub mod cloud;
+pub mod downloader;
 pub mod hardware;
 pub mod keychain;
+pub mod launcher;
 pub mod license;
 pub mod llm;
 pub mod startup;

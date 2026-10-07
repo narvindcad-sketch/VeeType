@@ -22,6 +22,13 @@ impl CloudLlm {
                     "GROQ_API_KEY",
                     "llama-3.3-70b-versatile",
                 )
+            } else if config.provider().eq_ignore_ascii_case("anthropic") {
+                (
+                    "anthropic",
+                    "https://api.anthropic.com/v1/messages",
+                    "ANTHROPIC_API_KEY",
+                    "claude-3-5-haiku-20241022",
+                )
             } else if config.provider().eq_ignore_ascii_case("openai") {
                 (
                     "openai",
@@ -31,7 +38,7 @@ impl CloudLlm {
                 )
             } else {
                 anyhow::bail!(
-                    "Cloud LLM provider must be \"groq\" or \"openai\", got {:?}",
+                    "Cloud LLM provider must be \"groq\", \"openai\" or \"anthropic\", got {:?}",
                     config.provider()
                 );
             };
@@ -73,19 +80,33 @@ impl CloudLlm {
         system_prompt: &str,
         raw_text: &str,
     ) -> anyhow::Result<String> {
-        let response = self
-            .client
-            .post(self.endpoint)
-            .bearer_auth(&self.api_key)
-            .json(&serde_json::json!({
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": raw_text}
-                ],
-                "temperature": 0.2,
-                "max_tokens": max_tokens
-            }))
+        let request = if self.provider == "anthropic" {
+            self.client
+                .post(self.endpoint)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&serde_json::json!({
+                    "model": self.model,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": raw_text}],
+                    "temperature": 0.2,
+                    "max_tokens": max_tokens
+                }))
+        } else {
+            self.client
+                .post(self.endpoint)
+                .bearer_auth(&self.api_key)
+                .json(&serde_json::json!({
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": raw_text}
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": max_tokens
+                }))
+        };
+        let response = request
             .send()
             .with_context(|| format!("Could not connect to {}", self.provider))?;
         let status = response.status();
@@ -97,7 +118,12 @@ impl CloudLlm {
         }
         let response: serde_json::Value = serde_json::from_str(&body)
             .with_context(|| format!("{} returned invalid JSON", self.provider))?;
-        response["choices"][0]["message"]["content"]
+        let content = if self.provider == "anthropic" {
+            &response["content"][0]["text"]
+        } else {
+            &response["choices"][0]["message"]["content"]
+        };
+        content
             .as_str()
             .map(str::trim)
             .filter(|content| !content.is_empty())
@@ -124,6 +150,9 @@ mod tests {
                 auto_start: false,
                 hands_free: false,
                 silence_timeout_ms: 1500,
+                noise_suppression: false,
+                has_completed_onboarding: true,
+                whisper_model: "ggml-base.bin".into(),
                 input_device: None,
             },
             api: crate::config::ApiConfig {
@@ -136,6 +165,8 @@ mod tests {
                 professional: String::new(),
             },
             vocabulary: HashMap::new(),
+            voice_commands: Default::default(),
+            app_profiles: Default::default(),
         };
 
         assert_eq!(config.provider(), "openai");

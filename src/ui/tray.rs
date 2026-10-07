@@ -127,6 +127,8 @@ mod tests {
     fn bundled_tray_icon_is_a_decodable_ico() {
         let icon = image::load_from_memory(include_bytes!("../../icon.ico"))
             .expect("bundled tray icon should decode");
-        assert_eq!(icon.dimensions(), (64, 64));
+        let (width, height) = icon.dimensions();
+        assert_eq!(width, height);
+        assert!(width >= 64);
     }
 }

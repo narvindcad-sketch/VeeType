@@ -276,6 +276,35 @@ fn get_active_window_title() -> String {
     }
 }
 
+fn get_active_application_exe() -> Option<String> {
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd == 0 {
+            return None;
+        }
+        let mut pid = 0_u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process == 0 {
+            return None;
+        }
+        let mut buffer = [0u16; 1024];
+        let mut length = buffer.len() as u32;
+        let ok = QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length);
+        CloseHandle(process);
+        if ok == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buffer[..length as usize]);
+        path.rsplit('\\').next().map(str::to_lowercase)
+    }
+}
+
 fn show_error_dialog(title: &str, message: &str) {
     let title = wide(title);
     let message = wide(message);
@@ -372,10 +401,10 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
     let config = load_config(&app_dir)?;
     let entitlements = match LicenseManager::cached_entitlements() {
         Ok(Some(entitlements)) => entitlements,
-        Ok(None) => Entitlements::default(),
+        Ok(None) => Entitlements::fallback(),
         Err(error) => {
             tracing::warn!(error = %error, "Cached Pro license is unavailable; using free features");
-            Entitlements::default()
+            Entitlements::fallback()
         }
     };
     if !is_valid_hotkey(config.settings.hotkey.trim()) {
@@ -391,10 +420,10 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
     }
     if !matches!(
         config.provider().to_ascii_lowercase().as_str(),
-        "local" | "groq" | "openai"
+        "local" | "groq" | "openai" | "anthropic"
     ) {
         anyhow::bail!(
-            "Unsupported provider {:?}; expected \"local\", \"groq\", or \"openai\"",
+            "Unsupported provider {:?}; expected \"local\", \"groq\", \"openai\", or \"anthropic\"",
             config.provider()
         );
     }
@@ -429,11 +458,18 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
 
     let cloud_llm = if effective_provider.eq_ignore_ascii_case("groq")
         || effective_provider.eq_ignore_ascii_case("openai")
+        || effective_provider.eq_ignore_ascii_case("anthropic")
     {
         Some(CloudLlm::from_config(&config)?)
     } else {
         None
     };
+
+    if !config.settings.has_completed_onboarding {
+        if let Err(error) = open_settings_window() {
+            tracing::warn!(error = %error, "Could not open the first-run setup wizard");
+        }
+    }
 
     let tray = ui::tray::Tray::new()?;
     let overlay = Overlay::spawn()?;
@@ -450,7 +486,16 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
         None
     };
 
-    let whisper_model_path = app_dir.join("Models/ggml-base.bin");
+    let configured_model = app_dir.join("Models").join(config.settings.whisper_model.trim());
+    let whisper_model_path = if configured_model.is_file() {
+        configured_model
+    } else {
+        tracing::warn!(
+            model = %configured_model.display(),
+            "Configured Whisper model is missing; falling back to ggml-base.bin"
+        );
+        app_dir.join("Models/ggml-base.bin")
+    };
     let ctx_params = WhisperContextParameters::default();
     let whisper_ctx = match WhisperContext::new_with_params(&whisper_model_path, ctx_params) {
         Ok(context) => {
@@ -515,6 +560,7 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
     let silence_limit = (16_000_u64 * config.settings.silence_timeout_ms / 1_000) as usize;
     let whisper_prompt = vocabulary_prompt(&config.vocabulary);
     let mut prompt_mode = PromptMode::Auto;
+    engine::launcher::start_indexing();
 
     loop {
         let mut quit_requested = false;
@@ -608,7 +654,9 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
             sample_format,
             native_sample_rate,
             channels,
+            config.settings.noise_suppression,
         )?;
+        let active_exe = get_active_application_exe();
         let listening_started = Instant::now();
         tracing::info!("Audio capture started");
 
@@ -700,17 +748,29 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
         );
         let raw_text = transcription_result?;
         let trimmed_raw = raw_text.trim();
-        if !trimmed_raw.is_empty() {
-            let window_title = if prompt_mode == PromptMode::Auto {
+        if !trimmed_raw.is_empty() && engine::launcher::evaluate_and_launch(trimmed_raw, &config.voice_commands) {
+            tracing::info!("Voice launch command handled; skipping text insertion");
+        } else if !trimmed_raw.is_empty() {
+            let profile = active_exe
+                .as_deref()
+                .and_then(|exe| config.app_profiles.get(exe));
+            let effective_mode = profile
+                .and_then(|profile| profile.mode.as_deref())
+                .and_then(PromptMode::from_name)
+                .filter(|mode| *mode != PromptMode::Auto)
+                .unwrap_or(prompt_mode);
+            let window_title = if effective_mode == PromptMode::Auto {
                 get_active_window_title().to_lowercase()
             } else {
                 String::new()
             };
-            let system_instruction = prompt_mode.resolve(&config.prompts, &window_title);
+            let system_instruction = effective_mode.resolve(&config.prompts, &window_title);
 
             let normalized_raw = apply_vocabulary(trimmed_raw, &config.vocabulary);
             let polishing_started = Instant::now();
-            let mut generated_text = if let Some(cloud_llm) = cloud_llm.as_ref() {
+            let mut generated_text = if profile.is_some_and(|profile| !profile.polish) {
+                normalized_raw.clone()
+            } else if let Some(cloud_llm) = cloud_llm.as_ref() {
                 cloud_llm.polish(
                     config.settings.max_tokens,
                     system_instruction,

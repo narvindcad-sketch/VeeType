@@ -13,6 +13,43 @@ pub struct AppConfig {
     pub prompts: Prompts,
     #[serde(default)]
     pub vocabulary: HashMap<String, String>,
+    #[serde(default)]
+    pub voice_commands: VoiceCommandConfig,
+    /// Per-application overrides keyed by lowercase executable name (e.g. "winword.exe").
+    #[serde(default)]
+    pub app_profiles: std::collections::BTreeMap<String, AppProfile>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AppProfile {
+    /// "default", "coding" or "professional"; unset keeps automatic selection.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// When false, the raw transcript is typed without LLM polishing.
+    #[serde(default = "default_true")]
+    pub polish: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VoiceCommandConfig {
+    pub enabled: bool,
+    pub triggers: Vec<String>,
+    /// Spoken app name -> executable or shortcut path.
+    pub aliases: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for VoiceCommandConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            triggers: ["open", "launch", "start", "run"].map(String::from).to_vec(),
+            aliases: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -63,6 +100,17 @@ pub struct Settings {
     pub silence_timeout_ms: u64,
     #[serde(default)]
     pub input_device: Option<String>,
+    #[serde(default)]
+    pub noise_suppression: bool,
+    /// Existing installs without this key are treated as already onboarded.
+    #[serde(default = "default_true")]
+    pub has_completed_onboarding: bool,
+    #[serde(default = "default_whisper_model")]
+    pub whisper_model: String,
+}
+
+fn default_whisper_model() -> String {
+    "ggml-base.bin".to_string()
 }
 
 fn default_provider() -> String {
@@ -106,6 +154,9 @@ impl Default for AppConfig {
                 hands_free: false,
                 silence_timeout_ms: default_silence_timeout_ms(),
                 input_device: None,
+                noise_suppression: false,
+                has_completed_onboarding: false,
+                whisper_model: default_whisper_model(),
             },
             api: ApiConfig::default(),
             prompts: Prompts {
@@ -114,6 +165,8 @@ impl Default for AppConfig {
                 professional: "You are a professional writing assistant. Format the user's speech into polished, formal, well-punctuated business prose. Remove all filler words.".to_string(),
             },
             vocabulary: HashMap::new(),
+            voice_commands: VoiceCommandConfig::default(),
+            app_profiles: Default::default(),
         }
     }
 }
@@ -126,6 +179,15 @@ pub enum PromptMode {
 }
 
 impl PromptMode {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "default" => Some(Self::Auto),
+            "coding" => Some(Self::Coding),
+            "professional" => Some(Self::Professional),
+            _ => None,
+        }
+    }
+
     pub fn resolve<'a>(self, prompts: &'a Prompts, window_title: &str) -> &'a str {
         let window_title = window_title.to_lowercase();
         match self {

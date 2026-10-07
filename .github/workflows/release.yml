@@ -186,7 +186,7 @@ jobs:
       - name: Stage installer release asset
         shell: pwsh
         run: |
-          Copy-Item Output\VeeType_Setup.exe dist\VeeType_Setup.exe
+          Copy-Item Output\VeeType_Installer_v*.exe dist\VeeType_Setup.exe
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
