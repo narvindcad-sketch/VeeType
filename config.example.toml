@@ -8,6 +8,8 @@ translate_to_english = true
 auto_start = false
 hands_free = false
 silence_timeout_ms = 1500
+has_completed_onboarding = false
+whisper_model = "ggml-base.bin"
 
 # Optional provider/model override. Supported providers: "local", "groq", "openai".
 # Cloud API keys are stored in Windows Credential Manager through VeeType Settings.

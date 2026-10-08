@@ -19,7 +19,7 @@ The [`index.html`](index.html) file is a product landing page. Its interactive d
 
 ## Build
 
-Requirements: Windows, Rust/Cargo, a working C++ build toolchain for native dependencies, and the model assets listed below.
+Build requirements: Windows, Rust/Cargo, and a working C++ build toolchain for native dependencies. A Whisper model is downloaded during first-run setup; model files are not required to compile the application.
 
 ```powershell
 cargo test
@@ -57,15 +57,15 @@ Use **VeeType Settings → Check for updates** to download and replace the execu
 
 Each release must include a ZIP asset whose name contains the Windows target triple `x86_64-pc-windows-msvc` and whose root contains `VeeType.exe` (for example, `VeeType-x86_64-pc-windows-msvc.zip`). Tag releases with the same version as `Cargo.toml`, such as `v1.0.9`. The installer remains available for new installations.
 
-Pushing a matching `v*` tag runs [the Windows release workflow](.github/workflows/release.yml). It runs the Rust tests, downloads pinned Whisper.cpp and Qwen 0.5B model files and their license notices for the installer, installs LunarG Vulkan SDK 1.3.296.0 and the SPIR-V-Headers CMake package, then builds one unsigned Vulkan-enabled executable for the installer and OTA ZIP. Missing or invalid Supabase licensing configuration disables account sign-in and Pro license verification for that build, but does not stop a basic local-dictation release. The workflow does not require paid code-signing credentials. Windows may show a SmartScreen warning for unsigned downloads. The executable can use Vulkan-capable NVIDIA, AMD, or Intel GPUs when compatible drivers are installed, and falls back to CPU inference when GPU initialization reports an error. Releases do not require CUDA or provide a separate NVIDIA-only binary.
+Pushing a matching `v*` tag runs [the Windows release workflow](.github/workflows/release.yml). It runs the Rust tests, installs LunarG Vulkan SDK 1.3.296.0 and the SPIR-V-Headers CMake package, then builds one unsigned Vulkan-enabled executable for the installer and OTA ZIP. The installer contains no models; the first-run Settings wizard downloads a Whisper model. Missing or invalid Supabase licensing configuration disables account sign-in and Pro license verification for that build, but does not stop a basic local-dictation release. The workflow does not require paid code-signing credentials. Windows may show a SmartScreen warning for unsigned downloads. The executable can use Vulkan-capable NVIDIA, AMD, or Intel GPUs when compatible drivers are installed, and falls back to CPU inference when GPU initialization reports an error. Releases do not require CUDA or provide a separate NVIDIA-only binary.
 
-The model downloads are pinned to specific public Hugging Face revisions. The Whisper model is MIT-licensed and the Qwen model is Apache-2.0; review and comply with the licenses included or linked from their upstream repositories when redistributing them.
+The Settings wizard downloads Whisper models from the whisper.cpp model repository. Local GGUF text-polishing models must be added separately; without one, dictation still inserts the raw transcript. Review the upstream model licenses before redistributing model files.
 
 ## Model assets
 
 Model weights are intentionally excluded from this public repository. Place the Whisper model at `Models\ggml-base.bin` and at least the smallest supported local text model at `Models\qwen2.5-0.5b-instruct-q4_k_m.gguf`. Larger supported model tiers can also be added; VeeType selects a tier based on available memory. Obtain model files from their official sources and comply with their respective licenses.
 
-To compile [`setup.iss`](setup.iss) with Inno Setup, first build the release executable and place the model files in `Models`. The installer includes those local model files; they are not committed to Git.
+To compile [`setup.iss`](setup.iss) with Inno Setup, first build the release executable. The installer creates an empty `Models` folder, and the first-run wizard downloads a Whisper model into it.
 The generated [`icon.ico`](icon.ico) is used for the tray icon and installer branding.
 
 ### Authenticode signing

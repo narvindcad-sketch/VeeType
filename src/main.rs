@@ -21,7 +21,8 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, SetLastError, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateMutexW, OpenEventW, SetEvent, EVENT_MODIFY_STATE, INFINITE,
+    CreateEventW, CreateMutexW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
+    INFINITE,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
@@ -161,6 +162,16 @@ fn application_directory() -> anyhow::Result<PathBuf> {
         .find(|directory| directory.join("Models").join("ggml-base.bin").is_file())
         .map(Path::to_path_buf)
         .unwrap_or(executable_dir))
+}
+
+fn installed_whisper_model(app_dir: &Path, preferred: &str) -> Option<PathBuf> {
+    let models_dir = app_dir.join("Models");
+    let selected = models_dir.join(preferred.trim());
+    if selected.is_file() {
+        return Some(selected);
+    }
+    let fallback = models_dir.join("ggml-base.bin");
+    fallback.is_file().then_some(fallback)
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -399,6 +410,9 @@ fn main() {
 fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
     let app_dir = application_directory()?;
     let config = load_config(&app_dir)?;
+    if !config.settings.has_completed_onboarding {
+        open_settings_window().context("Opening the first-run setup wizard")?;
+    }
     let entitlements = match LicenseManager::cached_entitlements() {
         Ok(Some(entitlements)) => entitlements,
         Ok(None) => Entitlements::fallback(),
@@ -465,12 +479,6 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
         None
     };
 
-    if !config.settings.has_completed_onboarding {
-        if let Err(error) = open_settings_window() {
-            tracing::warn!(error = %error, "Could not open the first-run setup wizard");
-        }
-    }
-
     let tray = ui::tray::Tray::new()?;
     let overlay = Overlay::spawn()?;
 
@@ -492,31 +500,60 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
         None
     };
 
-    let configured_model = app_dir.join("Models").join(config.settings.whisper_model.trim());
-    let whisper_model_path = if configured_model.is_file() {
-        configured_model
+    // The installer ships no models. Keep Settings accessible while the user downloads one.
+    let whisper_model_path = if let Some(path) =
+        installed_whisper_model(&app_dir, &config.settings.whisper_model)
+    {
+        path
     } else {
         tracing::warn!(
-            model = %configured_model.display(),
-            "Configured Whisper model is missing; falling back to ggml-base.bin"
-        );
-        app_dir.join("Models/ggml-base.bin")
-    };
-    // The installer ships no models; wait for the setup wizard to download one.
-    if !whisper_model_path.is_file() {
-        tracing::warn!(
-            model = %whisper_model_path.display(),
             "No Whisper model installed yet; waiting for a download from VeeType Settings"
         );
-        while !whisper_model_path.is_file() {
+        if config.settings.has_completed_onboarding {
+            open_settings_window().context("Opening Settings to install a Whisper model")?;
+        }
+        let path = loop {
+            // The wizard can select a different model; read its saved choice each time.
+            if app_dir.join("config.toml").is_file() {
+                if let Ok(current_config) = load_config(&app_dir) {
+                    if let Some(path) =
+                        installed_whisper_model(&app_dir, &current_config.settings.whisper_model)
+                    {
+                        break path;
+                    }
+                }
+            }
             if pump_windows_messages() {
                 return Ok(());
             }
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
+            // Relaunching the app and the tray menu must still open Settings while waiting.
+            if unsafe { WaitForSingleObject(wake_event, 0) } == WAIT_OBJECT_0 {
+                if let Err(error) = open_settings_window() {
+                    tracing::warn!(error = %error, "Could not open Settings");
+                }
+            }
+            while let Ok(event) = MenuEvent::receiver().try_recv() {
+                if tray.is_quit_event(&event) {
+                    return Ok(());
+                }
+                if tray.is_settings_event(&event) {
+                    if let Err(error) = open_settings_window() {
+                        show_error_dialog("Could not open VeeType Settings", &format!("{error}"));
+                    }
+                } else if tray.is_vault_event(&event) {
+                    if let Err(error) = std::env::current_exe()
+                        .and_then(|exe| Command::new(exe).arg("--vault").spawn())
+                    {
+                        show_error_dialog("Could not open Dictation Vault", &format!("{error}"));
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        };
         // Let the finished download settle before loading it.
         std::thread::sleep(std::time::Duration::from_secs(1));
-    }
+        path
+    };
     let ctx_params = WhisperContextParameters::default();
     let whisper_ctx = match WhisperContext::new_with_params(&whisper_model_path, ctx_params) {
         Ok(context) => {
@@ -856,6 +893,7 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::installed_whisper_model;
     use crate::config::{AppConfig, PromptMode, Prompts};
     use crate::engine::audio::{apply_vocabulary, vocabulary_prompt};
     use std::collections::HashMap;
@@ -991,5 +1029,23 @@ mod tests {
 
         assert_eq!(config.provider(), "openai");
         assert_eq!(config.model(), "gpt-4o-mini");
+    }
+
+    #[test]
+    fn detects_a_newly_selected_whisper_model_without_the_base_model() {
+        let app_dir = std::env::temp_dir().join(format!(
+            "veetype-model-test-{}",
+            std::process::id()
+        ));
+        let models_dir = app_dir.join("Models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        let selected = models_dir.join("ggml-small.en.bin");
+        assert!(installed_whisper_model(&app_dir, "ggml-small.en.bin").is_none());
+        std::fs::write(&selected, []).unwrap();
+        assert_eq!(
+            installed_whisper_model(&app_dir, "ggml-small.en.bin"),
+            Some(selected)
+        );
+        std::fs::remove_dir_all(app_dir).unwrap();
     }
 }

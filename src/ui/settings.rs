@@ -32,30 +32,47 @@ pub fn run(app_dir: PathBuf) -> anyhow::Result<()> {
     } else {
         viewport.with_inner_size([500.0, 700.0]).with_resizable(false)
     };
-    let options = eframe::NativeOptions {
-        viewport,
-        ..Default::default()
+    let run_with = |renderer: eframe::Renderer| -> anyhow::Result<()> {
+        let app_dir = app_dir.clone();
+        let config = load_config(&app_dir)?;
+        let logo_pixels = logo_pixels.clone();
+        let options = eframe::NativeOptions {
+            viewport: viewport.clone(),
+            renderer,
+            ..Default::default()
+        };
+        eframe::run_native(
+            "VeeType | Settings",
+            options,
+            Box::new(move |creation_context| {
+                configure_visuals(&creation_context.egui_ctx);
+                let logo = creation_context.egui_ctx.load_texture(
+                    "veetype-app-icon",
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [logo_width as usize, logo_height as usize],
+                        &logo_pixels,
+                    ),
+                    egui::TextureOptions::LINEAR,
+                );
+                Ok(Box::new(SettingsApp::new(app_dir, config, logo)))
+            }),
+        )
+        .map_err(|error| anyhow::anyhow!("Settings renderer failed: {error}"))
     };
 
-    eframe::run_native(
-        "VeeType | Settings",
-        options,
-        Box::new(move |creation_context| {
-            configure_visuals(&creation_context.egui_ctx);
-            let logo = creation_context.egui_ctx.load_texture(
-                "veetype-app-icon",
-                egui::ColorImage::from_rgba_unmultiplied(
-                    [logo_width as usize, logo_height as usize],
-                    &logo_pixels,
-                ),
-                egui::TextureOptions::LINEAR,
-            );
-            Ok(Box::new(SettingsApp::new(app_dir, config, logo)))
-        }),
-    )
-    .map_err(|error| anyhow::anyhow!("VeeType Settings window failed: {error}"))
+    tracing::info!("Opening Settings window (OpenGL renderer)");
+    match run_with(eframe::Renderer::Glow) {
+        Ok(()) => Ok(()),
+        Err(glow_error) => {
+            tracing::warn!(error = %glow_error, "OpenGL renderer failed; retrying with wgpu");
+            run_with(eframe::Renderer::Wgpu).map_err(|wgpu_error| {
+                anyhow::anyhow!(
+                    "VeeType Settings window failed. OpenGL: {glow_error}; wgpu: {wgpu_error}"
+                )
+            })
+        }
+    }
 }
-
 struct SettingsApp {
     app_dir: PathBuf,
     models_dir: PathBuf,

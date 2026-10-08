@@ -102,8 +102,8 @@ pub struct Settings {
     pub input_device: Option<String>,
     #[serde(default)]
     pub noise_suppression: bool,
-    /// Existing installs without this key are treated as already onboarded.
-    #[serde(default = "default_true")]
+    /// A configuration without this key still needs the first-run setup.
+    #[serde(default)]
     pub has_completed_onboarding: bool,
     #[serde(default = "default_whisper_model")]
     pub whisper_model: String,
@@ -242,5 +242,11 @@ mod tests {
 
         assert!(!contents.contains("openai_key"));
         assert!(!contents.contains("groq_key"));
+    }
+
+    #[test]
+    fn installer_config_starts_onboarding() {
+        let config: AppConfig = toml::from_str(include_str!("../config.example.toml")).unwrap();
+        assert!(!config.settings.has_completed_onboarding);
     }
 }
