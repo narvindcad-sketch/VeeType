@@ -1878,22 +1878,30 @@ fn test_microphone(device_name: Option<&str>) -> (bool, String, f32) {
                 .context("No microphone input device is available")?,
         };
         let supported = device.default_input_config()?;
-        if supported.sample_format() != cpal::SampleFormat::F32 {
-            anyhow::bail!("Unsupported microphone sample format");
-        }
         let peak = Arc::new(AtomicU32::new(0));
         let peak_writer = Arc::clone(&peak);
-        let stream = device.build_input_stream(
-            &supported.into(),
-            move |data: &[f32], _: &_| {
-                let level = data.iter().fold(0.0_f32, |max, s| max.max(s.abs()));
-                if level > f32::from_bits(peak_writer.load(Ordering::Relaxed)) {
-                    peak_writer.store(level.to_bits(), Ordering::Relaxed);
-                }
-            },
-            |error| tracing::warn!(%error, "Microphone test stream error"),
-            None,
-        )?;
+        let stream_config = supported.config();
+        let stream = match supported.sample_format() {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &stream_config,
+                move |data: &[f32], _: &_| record_peak(&peak_writer, data.iter().map(|sample| sample.abs())),
+                |error| tracing::warn!(%error, "Microphone test stream error"),
+                None,
+            )?,
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &stream_config,
+                move |data: &[i16], _: &_| record_peak(&peak_writer, data.iter().map(|sample| (*sample as f32 / i16::MAX as f32).abs())),
+                |error| tracing::warn!(%error, "Microphone test stream error"),
+                None,
+            )?,
+            cpal::SampleFormat::U16 => device.build_input_stream(
+                &stream_config,
+                move |data: &[u16], _: &_| record_peak(&peak_writer, data.iter().map(|sample| ((*sample as f32 / u16::MAX as f32) * 2.0 - 1.0).abs())),
+                |error| tracing::warn!(%error, "Microphone test stream error"),
+                None,
+            )?,
+            format => anyhow::bail!("Unsupported microphone sample format: {format:?}"),
+        };
         stream.play()?;
         std::thread::sleep(std::time::Duration::from_millis(500));
         Ok(f32::from_bits(peak.load(Ordering::Relaxed)))
@@ -1907,6 +1915,13 @@ fn test_microphone(device_name: Option<&str>) -> (bool, String, f32) {
             0.0,
         ),
         Err(error) => (false, format!("Microphone unavailable: {error:#}"), 0.0),
+    }
+}
+
+fn record_peak(samples_peak: &std::sync::Arc<std::sync::atomic::AtomicU32>, samples: impl Iterator<Item = f32>) {
+    let level = samples.fold(0.0_f32, f32::max);
+    if level > f32::from_bits(samples_peak.load(std::sync::atomic::Ordering::Relaxed)) {
+        samples_peak.store(level.to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
 }
 

@@ -427,7 +427,10 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
             config.settings.hotkey
         );
     }
-    engine::startup::set_enabled(config.settings.auto_start)?;
+    // Auto-start is changed when settings are saved.  Do not touch the Run
+    // registry key on every launch: managed Windows installations can deny
+    // registry writes, which previously prevented VeeType from starting even
+    // when auto-start was disabled.
     let _registered_hotkey = RegisteredHotkey::register(&config.settings.hotkey)?;
     if config.settings.max_tokens == 0 {
         anyhow::bail!("settings.max_tokens must be greater than zero");
@@ -596,15 +599,27 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
         .as_deref()
         .filter(|name| !name.trim().is_empty())
     {
-        Some(selected_name) => host
+        Some(selected_name) => match host
             .input_devices()?
             .find(|device| device.name().is_ok_and(|name| name == selected_name))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Configured microphone device {:?} is not available; select another device in VeeType Settings",
-                    selected_name
-                )
-            })?,
+        {
+            Some(device) => device,
+            None => {
+                // USB/Bluetooth device names regularly change after a driver
+                // update or reconnect.  Falling back keeps dictation usable
+                // instead of making the tray app exit at startup.
+                tracing::warn!(
+                    configured_device = selected_name,
+                    "Configured microphone is unavailable; using the Windows default input device"
+                );
+                host.default_input_device().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Configured microphone {:?} is unavailable and Windows has no default microphone",
+                        selected_name
+                    )
+                })?
+            }
+        },
         None => host
             .default_input_device()
             .ok_or_else(|| anyhow::anyhow!("No microphone input device is available"))?,

@@ -86,6 +86,48 @@ impl AudioCapture {
                     None,
                 )?
             }
+            cpal::SampleFormat::I16 => {
+                let mut sample_index = 0;
+                let ratio = native_sample_rate as f32 / 16_000.0;
+                device.build_input_stream(
+                    stream_config,
+                    move |data: &[i16], _: &_| {
+                        for frame in data.chunks(channels) {
+                            let current_idx = (sample_index as f32 / ratio) as usize;
+                            let next_idx = ((sample_index + 1) as f32 / ratio) as usize;
+                            if current_idx != next_idx {
+                                let mono = frame.iter().map(|sample| *sample as f32 / i16::MAX as f32).sum::<f32>()
+                                    / channels as f32;
+                                let _ = producer.push(mono.clamp(-1.0, 1.0));
+                            }
+                            sample_index += 1;
+                        }
+                    },
+                    |error| tracing::error!(%error, "Audio input stream error"),
+                    None,
+                )?
+            }
+            cpal::SampleFormat::U16 => {
+                let mut sample_index = 0;
+                let ratio = native_sample_rate as f32 / 16_000.0;
+                device.build_input_stream(
+                    stream_config,
+                    move |data: &[u16], _: &_| {
+                        for frame in data.chunks(channels) {
+                            let current_idx = (sample_index as f32 / ratio) as usize;
+                            let next_idx = ((sample_index + 1) as f32 / ratio) as usize;
+                            if current_idx != next_idx {
+                                let mono = frame.iter().map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0).sum::<f32>()
+                                    / channels as f32;
+                                let _ = producer.push(mono.clamp(-1.0, 1.0));
+                            }
+                            sample_index += 1;
+                        }
+                    },
+                    |error| tracing::error!(%error, "Audio input stream error"),
+                    None,
+                )?
+            }
             _ => anyhow::bail!("Unsupported microphone sample format: {sample_format:?}"),
         };
         stream
