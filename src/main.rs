@@ -462,6 +462,14 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
         // passes --background, keeping the tray service unobtrusive.
         open_settings_window().context("Opening the VeeType control window")?;
     }
+    // Migrate existing installations to the quiet sign-in command. A policy
+    // can deny this optional registry write, but that must never stop
+    // dictation from starting.
+    if config.settings.auto_start {
+        if let Err(error) = engine::startup::set_enabled(true) {
+            tracing::warn!(error = %error, "Could not refresh the Windows auto-start command");
+        }
+    }
     let entitlements = match LicenseManager::cached_entitlements() {
         Ok(Some(entitlements)) => entitlements,
         Ok(None) => Entitlements::fallback(),

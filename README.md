@@ -17,6 +17,12 @@ The [`index.html`](index.html) file is a product landing page. Its interactive d
 - Local searchable dictation history.
 - Audio/video transcription through FFmpeg.
 
+## Runtime behavior
+
+VeeType is a regular desktop app when you open it: its control window appears so you can review settings, models, history, and updates. When **Start with Windows** is enabled, it instead starts quietly in the system tray and becomes visible only when you open it or use its tray menu.
+
+The idle process is event-driven. It does not poll the keyboard, keep the microphone stream open, or animate the hidden overlay. Whisper and the optional local polishing model load only when a dictation needs them, stay warm briefly for follow-up dictation, and are released after two minutes of inactivity. The first dictation after launch or that idle timeout therefore takes a little longer while its model loads; later dictations are faster.
+
 ## Build
 
 Build requirements: Windows, Rust/Cargo, and a working C++ build toolchain for native dependencies. A Whisper model is downloaded during first-run setup; model files are not required to compile the application.
@@ -57,7 +63,7 @@ Use **VeeType Settings → Check for updates** to download and replace the execu
 
 Each release must include a ZIP asset whose name contains the Windows target triple `x86_64-pc-windows-msvc` and whose root contains `VeeType.exe` (for example, `VeeType-x86_64-pc-windows-msvc.zip`). Tag releases with the same version as `Cargo.toml`, such as `v1.0.9`. The installer remains available for new installations.
 
-Pushing a matching `v*` tag runs [the Windows release workflow](.github/workflows/release.yml). It runs the Rust tests, installs LunarG Vulkan SDK 1.3.296.0 and the SPIR-V-Headers CMake package, then builds one unsigned Vulkan-enabled executable for the installer and OTA ZIP. The installer contains no models; the first-run Settings wizard downloads a Whisper model. Missing or invalid Supabase licensing configuration disables account sign-in and Pro license verification for that build, but does not stop a basic local-dictation release. The workflow does not require paid code-signing credentials. Windows may show a SmartScreen warning for unsigned downloads. The executable can use Vulkan-capable NVIDIA, AMD, or Intel GPUs when compatible drivers are installed, and falls back to CPU inference when GPU initialization reports an error. Releases do not require CUDA or provide a separate NVIDIA-only binary.
+Every ordinary push to `main` runs [the Windows release workflow](.github/workflows/release.yml). It increments the patch version, synchronizes the application, lockfile, and installer metadata, creates a matching Git tag, then runs the Rust tests and publishes the installer and OTA ZIP. A manually pushed matching `v*` tag is also supported. The installer contains no models; the first-run Settings wizard downloads a Whisper model. Missing or invalid Supabase licensing configuration disables account sign-in and Pro license verification for that build, but does not stop a basic local-dictation release. The workflow does not require paid code-signing credentials. Windows may show a SmartScreen warning for unsigned downloads. The executable can use Vulkan-capable NVIDIA, AMD, or Intel GPUs when compatible drivers are installed, and falls back to CPU inference when GPU initialization reports an error. Releases do not require CUDA or provide a separate NVIDIA-only binary.
 
 The Settings wizard downloads Whisper models from the whisper.cpp model repository. Local GGUF text-polishing models must be added separately; without one, dictation still inserts the raw transcript. Review the upstream model licenses before redistributing model files.
 
