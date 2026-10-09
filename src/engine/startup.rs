@@ -16,7 +16,9 @@ pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
     let legacy_value_name = wide(LEGACY_VALUE_NAME);
     let command = if enabled {
         let executable = std::env::current_exe().context("Finding the VeeType executable")?;
-        Some(wide(&format!("\"{}\"", executable.display())))
+        // A user launch should open VeeType's control window. Windows sign-in
+        // uses the quiet tray-only mode instead.
+        Some(wide(&format!("\"{}\" --background", executable.display())))
     } else {
         None
     };

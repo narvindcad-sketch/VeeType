@@ -11,9 +11,13 @@ use walkdir::WalkDir;
 const MATCH_THRESHOLD: f64 = 0.85;
 
 static APP_INDEX: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
+static INDEXING_STARTED: OnceLock<()> = OnceLock::new();
 
 /// Builds the Start Menu index on a background thread.
 pub fn start_indexing() {
+    if INDEXING_STARTED.set(()).is_err() {
+        return;
+    }
     std::thread::spawn(|| {
         let _ = APP_INDEX.set(index_windows_apps());
     });

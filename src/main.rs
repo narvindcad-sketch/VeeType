@@ -18,11 +18,10 @@ use std::time::{Duration, Instant};
 use tray_icon::menu::MenuEvent;
 use whisper_rs::{WhisperContext, WhisperContextParameters};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, SetLastError, HANDLE, WAIT_FAILED, WAIT_OBJECT_0,
+    CloseHandle, GetLastError, SetLastError, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateMutexW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
-    INFINITE,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
@@ -199,14 +198,17 @@ fn take_hotkey_trigger() -> bool {
     HOTKEY_TRIGGERED.swap(false, Ordering::AcqRel)
 }
 
-fn wait_for_windows_activity(wake_event: HANDLE) -> anyhow::Result<bool> {
+fn wait_for_windows_activity(wake_event: HANDLE, timeout_ms: u32) -> anyhow::Result<bool> {
     let result = unsafe {
-        MsgWaitForMultipleObjectsEx(1, &wake_event, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+        MsgWaitForMultipleObjectsEx(1, &wake_event, timeout_ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
     };
     if result == WAIT_OBJECT_0 {
         return Ok(true);
     }
     if result == WAIT_OBJECT_0 + 1 {
+        return Ok(false);
+    }
+    if result == WAIT_TIMEOUT {
         return Ok(false);
     }
     if result == WAIT_FAILED {
@@ -222,6 +224,46 @@ fn open_settings_window() -> anyhow::Result<()> {
     let executable = std::env::current_exe()?;
     Command::new(executable).arg("--settings").spawn()?;
     Ok(())
+}
+
+fn load_whisper_engine(
+    whisper_model_path: &Path,
+) -> anyhow::Result<(WhisperContext, whisper_rs::WhisperState)> {
+    let ctx_params = WhisperContextParameters::default();
+    let whisper_ctx = match WhisperContext::new_with_params(whisper_model_path, ctx_params) {
+        Ok(context) => {
+            if cfg!(feature = "vulkan") {
+                tracing::info!("Whisper model loaded with Vulkan support enabled");
+            }
+            context
+        }
+        Err(gpu_error) if cfg!(feature = "vulkan") => {
+            tracing::warn!(
+                error = %gpu_error,
+                "Whisper GPU initialization failed; retrying with CPU inference"
+            );
+            let mut cpu_params = WhisperContextParameters::default();
+            cpu_params.use_gpu(false);
+            WhisperContext::new_with_params(whisper_model_path, cpu_params).map_err(
+                |cpu_error| {
+                    anyhow::anyhow!(
+                        "Failed to load Whisper model {} with GPU ({gpu_error}) and CPU fallback ({cpu_error})",
+                        whisper_model_path.display()
+                    )
+                },
+            )?
+        }
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "Failed to load Whisper model {}: {error}",
+                whisper_model_path.display()
+            ));
+        }
+    };
+    let whisper_state = whisper_ctx
+        .create_state()
+        .context("Failed to initialize Whisper transcription state")?;
+    Ok((whisper_ctx, whisper_state))
 }
 
 fn send_unicode_text(text: &str) -> anyhow::Result<()> {
@@ -343,6 +385,7 @@ fn initialize_logging() -> anyhow::Result<tracing_appender::non_blocking::Worker
 }
 
 fn main() {
+    let is_background = std::env::args().any(|argument| argument == "--background");
     let is_auxiliary_window =
         std::env::args().any(|argument| argument == "--settings" || argument == "--vault");
     let single_instance = if is_auxiliary_window {
@@ -394,7 +437,7 @@ fn main() {
         application_directory().and_then(ui::settings::run)
     } else {
         match single_instance.as_ref() {
-            Some(guard) => run_app(guard.wake_event),
+            Some(guard) => run_app(guard.wake_event, !is_background),
             None => Err(anyhow::anyhow!(
                 "The main application instance guard was not initialized"
             )),
@@ -407,11 +450,17 @@ fn main() {
     }
 }
 
-fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
+fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> {
     let app_dir = application_directory()?;
     let config = load_config(&app_dir)?;
+    let whisper_model_available =
+        installed_whisper_model(&app_dir, &config.settings.whisper_model).is_some();
     if !config.settings.has_completed_onboarding {
         open_settings_window().context("Opening the first-run setup wizard")?;
+    } else if show_control_center && whisper_model_available {
+        // A user launch behaves like a regular desktop app. Windows auto-start
+        // passes --background, keeping the tray service unobtrusive.
+        open_settings_window().context("Opening the VeeType control window")?;
     }
     let entitlements = match LicenseManager::cached_entitlements() {
         Ok(Some(entitlements)) => entitlements,
@@ -487,21 +536,16 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
 
     tracing::info!("Dictation engine starting");
 
-    let mut local_llm = if effective_provider.eq_ignore_ascii_case("local") {
-        match LocalLlm::load(&app_dir, entitlements.large_models) {
-            Ok(llm) => Some(llm),
-            Err(error) => {
-                tracing::warn!(error = %error, "Local polishing model unavailable; typing raw transcripts");
-                None
-            }
-        }
-    } else {
+    if !effective_provider.eq_ignore_ascii_case("local") {
         tracing::info!(
             provider = effective_provider,
             "Using cloud text polishing; Whisper remains local"
         );
-        None
-    };
+    }
+    // Both on-device models are loaded only after speech is captured. This
+    // leaves the always-on tray process with a tiny idle memory footprint.
+    let mut local_llm: Option<LocalLlm> = None;
+    let mut local_llm_unavailable = false;
 
     // The installer ships no models. Keep Settings accessible while the user downloads one.
     let whisper_model_path = if let Some(path) =
@@ -557,40 +601,8 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(1));
         path
     };
-    let ctx_params = WhisperContextParameters::default();
-    let whisper_ctx = match WhisperContext::new_with_params(&whisper_model_path, ctx_params) {
-        Ok(context) => {
-            if cfg!(feature = "vulkan") {
-                tracing::info!("Whisper model loaded with Vulkan support enabled");
-            }
-            context
-        }
-        Err(gpu_error) if cfg!(feature = "vulkan") => {
-            tracing::warn!(
-                error = %gpu_error,
-                "Whisper GPU initialization failed; retrying with CPU inference"
-            );
-            let mut cpu_params = WhisperContextParameters::default();
-            cpu_params.use_gpu(false);
-            WhisperContext::new_with_params(&whisper_model_path, cpu_params).map_err(
-                |cpu_error| {
-                    anyhow::anyhow!(
-                        "Failed to load Whisper model {} with GPU ({gpu_error}) and CPU fallback ({cpu_error})",
-                        whisper_model_path.display()
-                    )
-                },
-            )?
-        }
-        Err(error) => {
-            return Err(anyhow::anyhow!(
-                "Failed to load Whisper model {}: {error}",
-                whisper_model_path.display()
-            ));
-        }
-    };
-    let mut whisper_state = whisper_ctx
-        .create_state()
-        .context("Failed to initialize Whisper transcription state")?;
+    let mut whisper_engine: Option<(WhisperContext, whisper_rs::WhisperState)> = None;
+    let mut last_model_use: Option<Instant> = None;
 
     let host = cpal::default_host();
     let device = match config
@@ -633,11 +645,20 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
     let silence_limit = (16_000_u64 * config.settings.silence_timeout_ms / 1_000) as usize;
     let whisper_prompt = vocabulary_prompt(&config.vocabulary);
     let mut prompt_mode = PromptMode::Auto;
-    engine::launcher::start_indexing();
 
     loop {
         let mut quit_requested = false;
         loop {
+            if last_model_use.is_some_and(|used_at| {
+                used_at.elapsed() >= Duration::from_secs(120)
+            }) {
+                // Keep a short warm window for back-to-back dictation, then
+                // return the large model allocations to the OS and GPU.
+                whisper_engine = None;
+                local_llm = None;
+                last_model_use = None;
+                tracing::info!("Released inactive dictation models");
+            }
             if pump_windows_messages() {
                 quit_requested = true;
                 break;
@@ -682,9 +703,16 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
                         )
                         .pick_file()
                     {
+                        if whisper_engine.is_none() {
+                            whisper_engine = Some(load_whisper_engine(&whisper_model_path)?);
+                        }
+                        let (_, whisper_state) = whisper_engine
+                            .as_mut()
+                            .expect("Whisper engine was just initialized");
+                        last_model_use = Some(Instant::now());
                         match transcribe_media_file(
                             &path,
-                            &mut whisper_state,
+                            whisper_state,
                             &config.settings.language,
                             config.settings.translate_to_english,
                             &whisper_prompt,
@@ -707,10 +735,13 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
             }
 
             if take_hotkey_trigger() {
+                // Indexing shortcuts can briefly use disk and CPU, so defer it
+                // until the user first asks VeeType to listen.
+                engine::launcher::start_indexing();
                 overlay.show(OverlayState::Listening)?;
                 break;
             }
-            if wait_for_windows_activity(wake_event)? {
+            if wait_for_windows_activity(wake_event, 30_000)? {
                 if let Err(error) = open_settings_window() {
                     tracing::error!(error = %error, "Could not open Settings for the running VeeType instance");
                     show_error_dialog("Could not open VeeType Settings", &format!("{error:#}"));
@@ -808,8 +839,15 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
 
         overlay.show(OverlayState::Processing)?;
         let transcription_started = Instant::now();
+        if whisper_engine.is_none() {
+            whisper_engine = Some(load_whisper_engine(&whisper_model_path)?);
+        }
+        last_model_use = Some(Instant::now());
+        let (_, whisper_state) = whisper_engine
+            .as_mut()
+            .expect("Whisper engine was just initialized");
         let transcription_result = transcribe_audio(
-            &mut whisper_state,
+            whisper_state,
             &audio_samples,
             &config.settings.language,
             config.settings.translate_to_english,
@@ -854,20 +892,32 @@ fn run_app(wake_event: HANDLE) -> anyhow::Result<()> {
                         tracing::warn!(error = %error, "Cloud polishing failed; typing the raw transcript");
                         normalized_raw.clone()
                     })
-            } else if let Some(local_llm) = local_llm.as_mut() {
-                local_llm
-                    .polish(
-                        &app_dir,
-                        config.settings.max_tokens,
-                        system_instruction,
-                        &normalized_raw,
-                    )
-                    .unwrap_or_else(|error| {
-                        tracing::warn!(error = %error, "Local polishing failed; typing the raw transcript");
-                        normalized_raw.clone()
-                    })
             } else {
-                normalized_raw.clone()
+                if local_llm.is_none() && !local_llm_unavailable {
+                    match LocalLlm::load(&app_dir, entitlements.large_models) {
+                        Ok(llm) => local_llm = Some(llm),
+                        Err(error) => {
+                            tracing::warn!(error = %error, "Local polishing model unavailable; typing raw transcripts");
+                            local_llm_unavailable = true;
+                        }
+                    }
+                }
+                local_llm
+                    .as_mut()
+                    .map(|local_llm| {
+                        local_llm
+                            .polish(
+                                &app_dir,
+                                config.settings.max_tokens,
+                                system_instruction,
+                                &normalized_raw,
+                            )
+                            .unwrap_or_else(|error| {
+                                tracing::warn!(error = %error, "Local polishing failed; typing the raw transcript");
+                                normalized_raw.clone()
+                            })
+                    })
+                    .unwrap_or_else(|| normalized_raw.clone())
             };
             tracing::info!(
                 provider = effective_provider,

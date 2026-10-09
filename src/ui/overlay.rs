@@ -208,7 +208,15 @@ fn run_message_loop(hwnd: HWND, receiver: Receiver<OverlayCommand>) -> anyhow::R
             }
         }
 
-        match receiver.recv_timeout(Duration::from_millis(16)) {
+        // A hidden overlay has nothing to animate.  Waiting for a command
+        // instead of polling at 60 Hz keeps the app effectively idle between
+        // dictations.
+        let wait = if visible {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_secs(60 * 60)
+        };
+        match receiver.recv_timeout(wait) {
             Ok(OverlayCommand::Show(state)) => {
                 let position = overlay_position();
                 target_x = position.0;
