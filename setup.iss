@@ -22,7 +22,7 @@ UninstallDisplayIcon={app}\icon.ico
 SignTool=MsSign
 #endif
 OutputDir=Output
-OutputBaseFilename=VeeType_Installer_v0.1.1
+OutputBaseFilename=VeeType_Installer_v{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest

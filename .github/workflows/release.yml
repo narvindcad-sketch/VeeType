@@ -2,6 +2,8 @@ name: Windows Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -12,6 +14,8 @@ permissions:
 jobs:
   build-and-release:
     name: Build and publish Windows packages
+    # The release commit made below must not start a second patch release.
+    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: windows-2022
     permissions:
       contents: write
@@ -23,7 +27,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Validate release tag
+      - name: Calculate release version
         id: version
         shell: pwsh
         run: |
@@ -33,11 +37,56 @@ jobs:
             throw "Could not read the package version from Cargo.toml"
           }
           $packageVersion = $match.Groups[1].Value
-          $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
-          if ($env:GITHUB_REF_TYPE -eq "tag" -and $tagVersion -ne $packageVersion) {
-            throw "Release tag v$tagVersion must match Cargo.toml version $packageVersion"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $tagVersion = $env:GITHUB_REF_NAME -replace '^v', ''
+            if ($tagVersion -ne $packageVersion) {
+              throw "Release tag v$tagVersion must match Cargo.toml version $packageVersion"
+            }
+            "version=$packageVersion" >> $env:GITHUB_OUTPUT
+            "publish=true" >> $env:GITHUB_OUTPUT
+            exit 0
           }
-          "version=$packageVersion" >> $env:GITHUB_OUTPUT
+
+          if ($env:GITHUB_EVENT_NAME -ne "push") {
+            "version=$packageVersion" >> $env:GITHUB_OUTPUT
+            "publish=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+
+          $semver = [regex]::Match($packageVersion, '^(\d+)\.(\d+)\.(\d+)$')
+          if (-not $semver.Success) {
+            throw "Cargo.toml version $packageVersion is not a three-part release version"
+          }
+          $major = $semver.Groups[1].Value
+          $minor = $semver.Groups[2].Value
+          $patch = [int]$semver.Groups[3].Value
+          do {
+            $patch++
+            $nextVersion = "$major.$minor.$patch"
+            git rev-parse --verify --quiet "refs/tags/v$nextVersion" *> $null
+            $tagExists = $LASTEXITCODE -eq 0
+          } while ($tagExists)
+
+          $manifest = [regex]::Replace($manifest, '(?m)^version\s*=\s*"[^"]+"', "version = `"$nextVersion`"", 1)
+          Set-Content -Path Cargo.toml -Value $manifest -NoNewline -Encoding utf8
+
+          $lock = Get-Content Cargo.lock -Raw
+          $lock = $lock -replace '(?ms)(\[\[package\]\]\s+name = "VeeType"\s+version = ")[^"]+("\s)', "`${1}$nextVersion`${2}"
+          Set-Content -Path Cargo.lock -Value $lock -NoNewline -Encoding utf8
+
+          $installer = Get-Content setup.iss -Raw
+          $installer = $installer -replace '(?m)^#define AppVersion "[^"]+"', "#define AppVersion `"$nextVersion`""
+          Set-Content -Path setup.iss -Value $installer -NoNewline -Encoding utf8
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock setup.iss
+          git commit -m "chore(release): v$nextVersion"
+          git tag -a "v$nextVersion" -m "Release v$nextVersion"
+          git push origin HEAD:main --follow-tags
+
+          "version=$nextVersion" >> $env:GITHUB_OUTPUT
+          "publish=true" >> $env:GITHUB_OUTPUT
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -167,7 +216,7 @@ jobs:
           Copy-Item Output\VeeType_Installer_v*.exe dist\VeeType_Setup.exe
 
       - name: Upload build artifacts (manual runs)
-        if: github.ref_type != 'tag'
+        if: steps.version.outputs.publish != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: veetype-windows
@@ -175,7 +224,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release
-        if: github.ref_type == 'tag'
+        if: steps.version.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: |
