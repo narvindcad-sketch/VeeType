@@ -1,7 +1,6 @@
 //! Local Whisper transcription and audio/video file processing.
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -15,8 +14,6 @@ use webrtc_vad::{SampleRate, Vad, VadMode};
 use whisper_rs::{FullParams, SamplingStrategy};
 
 const VAD_FRAME_SAMPLES: usize = 480;
-const VAD_HANGOVER_FRAMES: usize = 15;
-const VAD_PRE_ROLL_FRAMES: usize = 10;
 
 pub struct AudioCapture {
     stream: Option<cpal::Stream>,
@@ -24,8 +21,6 @@ pub struct AudioCapture {
     samples: Vec<f32>,
     vad: Vad,
     pending_frame: Vec<f32>,
-    pre_roll: VecDeque<Vec<f32>>,
-    voice_hangover_frames: usize,
     silence_samples: usize,
     speech_detected: bool,
     denoiser: Option<Box<DenoiseState<'static>>>,
@@ -137,10 +132,8 @@ impl AudioCapture {
             stream: Some(stream),
             consumer,
             samples: Vec::new(),
-            vad: Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive),
+            vad: Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Quality),
             pending_frame: Vec::with_capacity(VAD_FRAME_SAMPLES),
-            pre_roll: VecDeque::with_capacity(VAD_PRE_ROLL_FRAMES),
-            voice_hangover_frames: 0,
             silence_samples: 0,
             speech_detected: false,
             denoiser: noise_suppression.then(DenoiseState::new),
@@ -178,28 +171,16 @@ impl AudioCapture {
                 .sqrt();
             processed_frames += 1;
 
+            // VAD controls hands-free stopping, not what Whisper can hear.
+            // Preserve quiet words and pauses in the original recording timeline.
+            self.samples.extend_from_slice(&frame);
+            voiced_energy += frame_energy;
+            voiced_frames += 1;
             if is_voice {
                 self.speech_detected = true;
-                self.voice_hangover_frames = VAD_HANGOVER_FRAMES;
                 self.silence_samples = 0;
-                self.samples.extend(self.pre_roll.drain(..).flatten());
-                self.samples.extend_from_slice(&frame);
-                voiced_energy += frame_energy;
-                voiced_frames += 1;
-            } else if self.voice_hangover_frames > 0 {
-                self.voice_hangover_frames -= 1;
+            } else if self.speech_detected {
                 self.silence_samples += VAD_FRAME_SAMPLES;
-                self.samples.extend_from_slice(&frame);
-                voiced_energy += frame_energy;
-                voiced_frames += 1;
-            } else {
-                if self.speech_detected {
-                    self.silence_samples += VAD_FRAME_SAMPLES;
-                }
-                if self.pre_roll.len() == VAD_PRE_ROLL_FRAMES {
-                    self.pre_roll.pop_front();
-                }
-                self.pre_roll.push_back(frame);
             }
         }
 
@@ -222,6 +203,8 @@ impl AudioCapture {
     pub fn finish(mut self) -> anyhow::Result<Vec<f32>> {
         drop(self.stream.take());
         self.process_pending_samples()?;
+        // The final word need not end exactly on a 30 ms VAD frame boundary.
+        self.samples.extend_from_slice(&self.pending_frame);
         Ok(self.samples)
     }
 }
@@ -296,9 +279,10 @@ pub fn transcribe_audio(
     language: &str,
     translate_to_english: bool,
     initial_prompt: &str,
+    n_threads: usize,
 ) -> anyhow::Result<String> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_n_threads(crate::engine::worker_thread_count() as i32);
+    params.set_n_threads(n_threads.max(1) as i32);
     let language = (!language.eq_ignore_ascii_case("auto")).then_some(language);
     params.set_language(language);
     params.set_translate(translate_to_english);
@@ -325,6 +309,7 @@ pub fn transcribe_media_file(
     translate_to_english: bool,
     initial_prompt: &str,
     vocabulary: &HashMap<String, String>,
+    n_threads: usize,
 ) -> anyhow::Result<PathBuf> {
     let output = Command::new("ffmpeg")
         .args(["-nostdin", "-v", "error", "-i"])
@@ -364,6 +349,7 @@ pub fn transcribe_media_file(
         language,
         translate_to_english,
         initial_prompt,
+        n_threads,
     )?;
     let text = apply_vocabulary(&text, vocabulary);
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -383,6 +369,35 @@ pub fn transcribe_media_file(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recording_preserves_quiet_edges_and_a_pause_between_words() {
+        let first_word = vec![0.001; 480];
+        let pause = vec![0.0; 16_000];
+        let second_word = vec![0.2; 480];
+        let last_word_tail = vec![0.002; 137];
+        let expected = [first_word, pause, second_word, last_word_tail].concat();
+        let ring_buffer = ringbuf::HeapRb::<f32>::new(expected.len());
+        let (mut producer, consumer) = ring_buffer.split();
+        for sample in &expected {
+            producer.push(*sample).unwrap();
+        }
+        let capture = super::AudioCapture {
+            stream: None,
+            consumer,
+            samples: Vec::new(),
+            vad: webrtc_vad::Vad::new_with_rate_and_mode(
+                webrtc_vad::SampleRate::Rate16kHz,
+                webrtc_vad::VadMode::Quality,
+            ),
+            pending_frame: Vec::new(),
+            silence_samples: 0,
+            speech_detected: false,
+            denoiser: None,
+        };
+        // Exercise the real VAD/draining path, including the incomplete tail.
+        assert_eq!(capture.finish().unwrap(), expected);
+    }
+
     #[test]
     fn denoiser_preserves_frame_length_and_range() {
         let mut denoiser = nnnoiseless::DenoiseState::new();

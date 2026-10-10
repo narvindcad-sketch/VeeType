@@ -2,7 +2,7 @@
 hotkey = "RightAlt"
 max_tokens = 64
 provider = "local"
-groq_model = "llama-3.3-70b-versatile"
+groq_model = "openai/gpt-oss-20b"
 language = "auto"
 translate_to_english = true
 auto_start = false
@@ -16,7 +16,7 @@ whisper_model = "ggml-base.bin"
 # GROQ_API_KEY and OPENAI_API_KEY environment variables are supported as a fallback.
 # [api]
 # provider = "groq"
-# model = "llama-3.3-70b-versatile"
+# model = "openai/gpt-oss-20b"
 
 [prompts]
 default = "You are a professional text-cleaning assistant. Clean up the user's raw voice transcript, remove filler words (like 'um', 'uh', 'ah'), fix punctuation, and output ONLY the polished text."

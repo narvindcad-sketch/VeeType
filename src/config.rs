@@ -118,7 +118,7 @@ fn default_provider() -> String {
 }
 
 fn default_groq_model() -> String {
-    "llama-3.3-70b-versatile".to_string()
+    "openai/gpt-oss-20b".to_string()
 }
 
 fn default_language() -> String {

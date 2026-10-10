@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::Context;
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -8,6 +9,7 @@ use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::{params::LlamaModelParams, AddBos};
 use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 use sysinfo::System;
+use crate::engine::adaptive::{AdaptiveBackend, ComputeBackend};
 
 pub fn apply_voice_commands(raw_text: &str) -> String {
     let commands = [
@@ -94,18 +96,26 @@ struct CachedLlm {
     backend: LlamaBackend,
     model_path: PathBuf,
     tier: u8,
+    adaptive: AdaptiveBackend,
+    compute_backend: ComputeBackend,
 }
 
 impl CachedLlm {
     fn load(model_path: PathBuf, tier: u8) -> anyhow::Result<Self> {
         let backend = LlamaBackend::init()?;
-        let model = load_model_with_backend_fallback(&backend, &model_path)?;
+        let mut adaptive = AdaptiveBackend::new();
+        let requested = adaptive.select(std::fs::metadata(&model_path)?.len(), false);
+        let (model, compute_backend) = load_model_with_backend_fallback(&backend, &model_path, requested)?;
+        if requested == ComputeBackend::Gpu && compute_backend == ComputeBackend::Cpu { adaptive.gpu_failed(); }
+        else { adaptive.activate(compute_backend); }
 
         Ok(Self {
             model: Some(model),
             backend,
             model_path,
             tier,
+            adaptive,
+            compute_backend,
         })
     }
 
@@ -116,20 +126,29 @@ impl CachedLlm {
     }
 
     fn downgrade_if_needed(&mut self, model_path: PathBuf, tier: u8) -> anyhow::Result<()> {
-        if tier <= self.tier || model_path == self.model_path {
+        let (model_path, tier) = if tier > self.tier && model_path != self.model_path {
+            (model_path, tier)
+        } else { (self.model_path.clone(), self.tier) };
+        let target = self.adaptive.select(std::fs::metadata(&model_path)?.len(), self.model.is_some() && self.compute_backend == ComputeBackend::Gpu);
+        if tier == self.tier && target == self.compute_backend && self.model.is_some() {
             return Ok(());
         }
 
         tracing::warn!(
             previous_tier = self.tier,
             new_tier = tier,
-            "Memory pressure detected; switching LLM model tier"
+            backend = ?target,
+            "Switching local polishing model/backend between requests"
         );
 
-        let model = load_model_with_backend_fallback(&self.backend, &model_path)?;
+        self.model = None;
+        let (model, actual) = load_model_with_backend_fallback(&self.backend, &model_path, target)?;
+        if target == ComputeBackend::Gpu && actual == ComputeBackend::Cpu { self.adaptive.gpu_failed(); }
+        else { self.adaptive.activate(actual); }
         self.model = Some(model);
         self.model_path = model_path;
         self.tier = tier;
+        self.compute_backend = actual;
         Ok(())
     }
 }
@@ -137,11 +156,12 @@ impl CachedLlm {
 fn load_model_with_backend_fallback(
     backend: &LlamaBackend,
     model_path: &Path,
-) -> anyhow::Result<LlamaModel> {
-    let gpu_layers = crate::engine::hardware::initialize_backend_hardware();
+    requested: ComputeBackend,
+) -> anyhow::Result<(LlamaModel, ComputeBackend)> {
+    let gpu_layers = if requested == ComputeBackend::Gpu { 99 } else { 0 };
     let gpu_params = LlamaModelParams::default().with_n_gpu_layers(gpu_layers);
     match LlamaModel::load_from_file(backend, model_path, &gpu_params) {
-        Ok(model) => Ok(model),
+        Ok(model) => Ok((model, requested)),
         Err(gpu_error) if gpu_layers > 0 => {
             tracing::warn!(
                 error = %gpu_error,
@@ -150,6 +170,7 @@ fn load_model_with_backend_fallback(
             let cpu_params = LlamaModelParams::default().with_n_gpu_layers(0);
             LlamaModel::load_from_file(backend, model_path, &cpu_params)
                 .with_context(|| format!("Loading {} with CPU fallback", model_path.display()))
+                .map(|model| (model, ComputeBackend::Cpu))
         }
         Err(error) => Err(error.into()),
     }
@@ -184,7 +205,7 @@ impl LocalLlm {
             .downgrade_if_needed(model_path, target_tier)?;
 
         let model = self.cached_model.model()?;
-        let thread_count = crate::engine::worker_thread_count() as i32;
+        let thread_count = self.cached_model.adaptive.thread_count() as i32;
         let ctx_params = LlamaContextParams::default()
             .with_n_threads(thread_count)
             .with_n_threads_batch(thread_count);
@@ -208,6 +229,7 @@ impl LocalLlm {
         ctx.decode(&mut batch)
             .context("Failed to decode the prompt")?;
 
+        let inference_started = Instant::now();
         let mut generated_text = String::new();
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut current_position = tokens.len() as i32;
@@ -234,6 +256,14 @@ impl LocalLlm {
         }
 
         let _ = decoder.decode_to_string(&[], &mut generated_text, true);
+
+        // Release the inference context's borrow before updating the router.
+        drop(ctx);
+        self.cached_model.adaptive.record_performance(
+            self.cached_model.compute_backend,
+            current_position.saturating_sub(tokens.len() as i32).max(1) as f64,
+            inference_started.elapsed(),
+        );
 
         Ok(generated_text)
     }

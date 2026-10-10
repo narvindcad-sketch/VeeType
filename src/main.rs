@@ -4,6 +4,7 @@ mod config;
 mod engine;
 mod ui;
 mod utils;
+mod text_input;
 
 use anyhow::Context;
 use config::{load_config, PromptMode};
@@ -27,8 +28,7 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+    RegisterHotKey, UnregisterHotKey,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetForegroundWindow, GetWindowTextW, MessageBoxW,
@@ -40,6 +40,7 @@ use engine::audio::{
     apply_vocabulary, transcribe_audio, transcribe_media_file, vocabulary_prompt, AudioCapture,
 };
 use engine::cloud::CloudLlm;
+use engine::adaptive::{AdaptiveBackend, ComputeBackend};
 use engine::license::{Entitlements, LicenseManager};
 use engine::llm::{apply_voice_commands, LocalLlm};
 use engine::{effective_provider, hands_free_enabled};
@@ -226,24 +227,67 @@ fn open_settings_window() -> anyhow::Result<()> {
     Ok(())
 }
 
+enum SpeechEngine {
+    Whisper {
+        _context: WhisperContext,
+        state: whisper_rs::WhisperState,
+    },
+    Universal {
+        _model: transcribe_cpp::Model,
+        session: transcribe_cpp::Session,
+        architecture: String,
+    },
+}
+
+struct LoadedWhisper {
+    engine: SpeechEngine,
+    backend: ComputeBackend,
+}
+
 fn load_whisper_engine(
     whisper_model_path: &Path,
-) -> anyhow::Result<(WhisperContext, whisper_rs::WhisperState)> {
-    let ctx_params = WhisperContextParameters::default();
+    requested_backend: ComputeBackend,
+) -> anyhow::Result<LoadedWhisper> {
+    if whisper_model_path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) {
+        let requested = match requested_backend {
+            ComputeBackend::Cpu => transcribe_cpp::Backend::Cpu,
+            ComputeBackend::Gpu => transcribe_cpp::Backend::Vulkan,
+        };
+        let options = transcribe_cpp::ModelOptions { backend: requested, device: None };
+        let model = match transcribe_cpp::Model::load_with(whisper_model_path, &options) {
+            Ok(model) => model,
+            Err(gpu_error) if requested_backend == ComputeBackend::Gpu => {
+                tracing::warn!(error = %gpu_error, "Universal speech-model GPU initialization failed; retrying on CPU");
+                return load_whisper_engine(whisper_model_path, ComputeBackend::Cpu);
+            }
+            Err(error) => return Err(error).with_context(|| format!("Loading universal speech model {}", whisper_model_path.display())),
+        };
+        let architecture = model.arch();
+        let session = model.session_with(&transcribe_cpp::SessionOptions {
+            n_threads: engine::worker_thread_count() as i32,
+            ..Default::default()
+        }).context("Creating universal speech-model session")?;
+        tracing::info!(backend = ?requested_backend, architecture, "Universal speech model loaded");
+        return Ok(LoadedWhisper {
+            engine: SpeechEngine::Universal { _model: model, session, architecture },
+            backend: requested_backend,
+        });
+    }
+    let mut ctx_params = WhisperContextParameters::default();
+    ctx_params.use_gpu(requested_backend == ComputeBackend::Gpu);
+    let mut actual_backend = requested_backend;
     let whisper_ctx = match WhisperContext::new_with_params(whisper_model_path, ctx_params) {
         Ok(context) => {
-            if cfg!(feature = "vulkan") {
-                tracing::info!("Whisper model loaded with Vulkan support enabled");
-            }
             context
         }
-        Err(gpu_error) if cfg!(feature = "vulkan") => {
+        Err(gpu_error) if requested_backend == ComputeBackend::Gpu => {
             tracing::warn!(
                 error = %gpu_error,
                 "Whisper GPU initialization failed; retrying with CPU inference"
             );
             let mut cpu_params = WhisperContextParameters::default();
             cpu_params.use_gpu(false);
+            actual_backend = ComputeBackend::Cpu;
             WhisperContext::new_with_params(whisper_model_path, cpu_params).map_err(
                 |cpu_error| {
                     anyhow::anyhow!(
@@ -260,54 +304,66 @@ fn load_whisper_engine(
             ));
         }
     };
-    let whisper_state = whisper_ctx
-        .create_state()
-        .context("Failed to initialize Whisper transcription state")?;
-    Ok((whisper_ctx, whisper_state))
+    let whisper_state = match whisper_ctx.create_state() {
+        Ok(state) => state,
+        Err(error) if actual_backend == ComputeBackend::Gpu => {
+            tracing::warn!(%error, "Whisper GPU state allocation failed; retrying on CPU");
+            drop(whisper_ctx);
+            return load_whisper_engine(whisper_model_path, ComputeBackend::Cpu);
+        }
+        Err(error) => return Err(error).context("Failed to initialize Whisper transcription state"),
+    };
+    tracing::info!(backend = ?actual_backend, "Whisper model loaded");
+    Ok(LoadedWhisper {
+        engine: SpeechEngine::Whisper { _context: whisper_ctx, state: whisper_state },
+        backend: actual_backend,
+    })
+}
+
+fn transcribe_with_engine(
+    loaded: &mut LoadedWhisper,
+    samples: &[f32],
+    language: &str,
+    translate_to_english: bool,
+    prompt: &str,
+    n_threads: usize,
+) -> anyhow::Result<String> {
+    match &mut loaded.engine {
+        SpeechEngine::Whisper { state, .. } => transcribe_audio(
+            state, samples, language, translate_to_english, prompt, n_threads,
+        ),
+        SpeechEngine::Universal { session, architecture, .. } => {
+            let options = transcribe_cpp::RunOptions {
+                task: if translate_to_english { transcribe_cpp::Task::Translate } else { transcribe_cpp::Task::Transcribe },
+                language: (!language.eq_ignore_ascii_case("auto")).then(|| language.to_string()),
+                target_language: translate_to_english.then(|| "en".to_string()),
+                ..Default::default()
+            };
+            session.run(samples, &options)
+                .map(|result| result.text)
+                .map_err(|error| anyhow::anyhow!("{architecture} transcription failed: {error}"))
+        }
+    }
+}
+
+fn ensure_whisper_engine(
+    engine: &mut Option<LoadedWhisper>, path: &Path, scheduler: &mut AdaptiveBackend,
+) -> anyhow::Result<()> {
+    let resident_gpu = engine.as_ref().is_some_and(|engine| engine.backend == ComputeBackend::Gpu);
+    let requested = scheduler.select(fs::metadata(path)?.len(), resident_gpu);
+    if engine.as_ref().is_some_and(|engine| engine.backend == requested) { return Ok(()); }
+    // Release the previous backend before allocating its replacement.
+    *engine = None;
+    let loaded = load_whisper_engine(path, requested)?;
+    if requested == ComputeBackend::Gpu && loaded.backend == ComputeBackend::Cpu {
+        scheduler.gpu_failed();
+    } else { scheduler.activate(loaded.backend); }
+    *engine = Some(loaded);
+    Ok(())
 }
 
 fn send_unicode_text(text: &str) -> anyhow::Result<()> {
-    const MAX_UNITS_PER_BATCH: usize = 5_000;
-
-    for utf16_batch in text
-        .encode_utf16()
-        .collect::<Vec<_>>()
-        .chunks(MAX_UNITS_PER_BATCH)
-    {
-        let mut inputs = Vec::with_capacity(utf16_batch.len() * 2);
-        for &unit in utf16_batch {
-            for flags in [KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP] {
-                inputs.push(INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: 0,
-                            wScan: unit,
-                            dwFlags: flags,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                });
-            }
-        }
-
-        let expected = inputs.len() as u32;
-        let sent = unsafe {
-            SendInput(
-                expected,
-                inputs.as_ptr(),
-                std::mem::size_of::<INPUT>() as i32,
-            )
-        };
-        if sent != expected {
-            anyhow::bail!(
-                "Windows accepted {sent} of {expected} Unicode keyboard events (error {})",
-                unsafe { GetLastError() }
-            );
-        }
-    }
-    Ok(())
+    text_input::send_text(text)
 }
 
 fn get_active_window_title() -> String {
@@ -527,6 +583,8 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
         hotkey = %config.settings.hotkey,
         max_tokens = max_new_tokens,
         provider = effective_provider,
+        language = %config.settings.language,
+        translate_to_english = config.settings.translate_to_english,
         "Configuration loaded"
     );
 
@@ -609,7 +667,8 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
         std::thread::sleep(std::time::Duration::from_secs(1));
         path
     };
-    let mut whisper_engine: Option<(WhisperContext, whisper_rs::WhisperState)> = None;
+    let mut whisper_engine: Option<LoadedWhisper> = None;
+    let mut whisper_scheduler = AdaptiveBackend::new();
     let mut last_model_use: Option<Instant> = None;
 
     let host = cpal::default_host();
@@ -658,9 +717,9 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
         let mut quit_requested = false;
         loop {
             if last_model_use.is_some_and(|used_at| {
-                used_at.elapsed() >= Duration::from_secs(120)
+                used_at.elapsed() >= Duration::from_secs(900)
             }) {
-                // Keep a short warm window for back-to-back dictation, then
+                // Keep the model warm across a normal dictation session, then
                 // return the large model allocations to the OS and GPU.
                 whisper_engine = None;
                 local_llm = None;
@@ -711,21 +770,22 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
                         )
                         .pick_file()
                     {
-                        if whisper_engine.is_none() {
-                            whisper_engine = Some(load_whisper_engine(&whisper_model_path)?);
-                        }
-                        let (_, whisper_state) = whisper_engine
-                            .as_mut()
-                            .expect("Whisper engine was just initialized");
+                        ensure_whisper_engine(&mut whisper_engine, &whisper_model_path, &mut whisper_scheduler)?;
                         last_model_use = Some(Instant::now());
-                        match transcribe_media_file(
-                            &path,
-                            whisper_state,
-                            &config.settings.language,
-                            config.settings.translate_to_english,
-                            &whisper_prompt,
-                            &config.vocabulary,
-                        ) {
+                        let result = match &mut whisper_engine
+                            .as_mut()
+                            .expect("Speech engine was just initialized").engine
+                        {
+                            SpeechEngine::Whisper { state, .. } => transcribe_media_file(
+                                &path, state, &config.settings.language,
+                                config.settings.translate_to_english, &whisper_prompt,
+                                &config.vocabulary, whisper_scheduler.thread_count(),
+                            ),
+                            SpeechEngine::Universal { .. } => Err(anyhow::anyhow!(
+                                "Media-file transcription currently requires a Whisper model"
+                            )),
+                        };
+                        match result {
                             Ok(transcript_path) => {
                                 tracing::info!(path = %transcript_path.display(), "Media transcript saved");
                             }
@@ -743,10 +803,6 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
             }
 
             if take_hotkey_trigger() {
-                // Indexing shortcuts can briefly use disk and CPU, so defer it
-                // until the user first asks VeeType to listen.
-                engine::launcher::start_indexing();
-                overlay.show(OverlayState::Listening)?;
                 break;
             }
             if wait_for_windows_activity(wake_event, 30_000)? {
@@ -771,6 +827,9 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
         let active_exe = get_active_application_exe();
         let listening_started = Instant::now();
         tracing::info!("Audio capture started");
+        // Show readiness only after the microphone stream has started.
+        overlay.show(OverlayState::Listening)?;
+        engine::launcher::start_indexing();
 
         if hands_free_enabled {
             while is_hotkey_pressed(&config.settings.hotkey) {
@@ -827,6 +886,23 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        if quit_requested {
+            drop(capture);
+            overlay.hide()?;
+            break;
+        }
+
+        // Drain a small trailing window so releasing the key doesn't cut the
+        // last syllable or an audio-driver buffer still in flight.
+        let tail_deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < tail_deadline {
+            if pump_windows_messages() {
+                quit_requested = true;
+                break;
+            }
+            capture.drain_samples()?;
+            std::thread::sleep(Duration::from_millis(10));
+        }
         overlay.hide()?;
         if quit_requested {
             drop(capture);
@@ -846,23 +922,36 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
         }
 
         overlay.show(OverlayState::Processing)?;
-        let transcription_started = Instant::now();
-        if whisper_engine.is_none() {
-            whisper_engine = Some(load_whisper_engine(&whisper_model_path)?);
-        }
+        ensure_whisper_engine(&mut whisper_engine, &whisper_model_path, &mut whisper_scheduler)?;
         last_model_use = Some(Instant::now());
-        let (_, whisper_state) = whisper_engine
-            .as_mut()
-            .expect("Whisper engine was just initialized");
-        let transcription_result = transcribe_audio(
-            whisper_state,
-            &audio_samples,
-            &config.settings.language,
-            config.settings.translate_to_english,
-            &whisper_prompt,
+        let mut actual_backend = whisper_engine.as_ref().expect("Whisper engine loaded").backend;
+        let mut transcription_started = Instant::now();
+        let mut transcription_result = transcribe_with_engine(
+            whisper_engine.as_mut().expect("Speech engine loaded"),
+            &audio_samples, &config.settings.language,
+            config.settings.translate_to_english, &whisper_prompt,
+            whisper_scheduler.thread_count(),
         );
+        if transcription_result.is_err() && actual_backend == ComputeBackend::Gpu {
+            tracing::warn!(error = ?transcription_result.as_ref().err(), "GPU transcription failed; retrying retained audio on CPU");
+            whisper_engine = None;
+            whisper_scheduler.gpu_failed();
+            ensure_whisper_engine(&mut whisper_engine, &whisper_model_path, &mut whisper_scheduler)?;
+            actual_backend = ComputeBackend::Cpu;
+            transcription_started = Instant::now();
+            transcription_result = transcribe_with_engine(
+                whisper_engine.as_mut().expect("CPU fallback loaded"),
+                &audio_samples, &config.settings.language,
+                config.settings.translate_to_english, &whisper_prompt,
+                whisper_scheduler.thread_count(),
+            );
+        }
+        if transcription_result.is_ok() {
+            whisper_scheduler.record_performance(actual_backend, audio_samples.len() as f64 / 16_000.0, transcription_started.elapsed());
+        }
         tracing::info!(
             elapsed_ms = transcription_started.elapsed().as_millis(),
+            backend = ?actual_backend,
             "Whisper transcription completed"
         );
         let raw_text = transcription_result?;
@@ -885,7 +974,12 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
             };
             let system_instruction = effective_mode.resolve(&config.prompts, &window_title);
 
-            let normalized_raw = apply_vocabulary(trimmed_raw, &config.vocabulary);
+            let filler_cleaned = if config.settings.language.eq_ignore_ascii_case("en") {
+                engine::text_cleanup::clean_english_transcript(trimmed_raw)
+            } else {
+                trimmed_raw.to_string()
+            };
+            let normalized_raw = apply_vocabulary(&filler_cleaned, &config.vocabulary);
             let polishing_started = Instant::now();
             let mut generated_text = if profile.is_some_and(|profile| !profile.polish) {
                 normalized_raw.clone()

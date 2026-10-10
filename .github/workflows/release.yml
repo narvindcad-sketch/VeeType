@@ -14,8 +14,6 @@ permissions:
 jobs:
   build-and-release:
     name: Build and publish Windows packages
-    # The release commit made below must not start a second patch release.
-    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: windows-2022
     permissions:
       contents: write
@@ -57,35 +55,24 @@ jobs:
           if (-not $semver.Success) {
             throw "Cargo.toml version $packageVersion is not a three-part release version"
           }
-          $major = $semver.Groups[1].Value
-          $minor = $semver.Groups[2].Value
-          $patch = [int]$semver.Groups[3].Value
-          do {
-            $patch++
-            $nextVersion = "$major.$minor.$patch"
-            git rev-parse --verify --quiet "refs/tags/v$nextVersion" *> $null
-            $tagExists = $LASTEXITCODE -eq 0
-          } while ($tagExists)
+          git fetch --tags --force
+          git rev-parse --verify --quiet "refs/tags/v$packageVersion" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            # A maintenance-only push without a version bump must not
+            # overwrite the existing immutable release.
+            "version=$packageVersion" >> $env:GITHUB_OUTPUT
+            "publish=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
 
-          $manifest = [regex]::Replace($manifest, '(?m)^version\s*=\s*"[^"]+"', "version = `"$nextVersion`"", 1)
-          Set-Content -Path Cargo.toml -Value $manifest -NoNewline -Encoding utf8
-
-          $lock = Get-Content Cargo.lock -Raw
-          $lock = $lock -replace '(?ms)(\[\[package\]\]\s+name = "VeeType"\s+version = ")[^"]+("\s)', "`${1}$nextVersion`${2}"
-          Set-Content -Path Cargo.lock -Value $lock -NoNewline -Encoding utf8
-
-          $installer = Get-Content setup.iss -Raw
-          $installer = $installer -replace '(?m)^#define AppVersion "[^"]+"', "#define AppVersion `"$nextVersion`""
-          Set-Content -Path setup.iss -Value $installer -NoNewline -Encoding utf8
-
+          # Cargo.toml is the source of truth. The installer and lockfile are
+          # checked into the same commit with the identical version.
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock setup.iss
-          git commit -m "chore(release): v$nextVersion"
-          git tag -a "v$nextVersion" -m "Release v$nextVersion"
-          git push origin HEAD:main --follow-tags
+          git tag -a "v$packageVersion" -m "Release v$packageVersion"
+          git push origin "v$packageVersion"
 
-          "version=$nextVersion" >> $env:GITHUB_OUTPUT
+          "version=$packageVersion" >> $env:GITHUB_OUTPUT
           "publish=true" >> $env:GITHUB_OUTPUT
 
       - name: Set up Rust

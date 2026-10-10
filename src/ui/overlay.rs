@@ -20,12 +20,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, PeekMessageW, RegisterClassW, SetLayeredWindowAttributes, SetWindowPos,
     ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, LWA_COLORKEY, MSG,
     PM_REMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
-    WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-const WINDOW_WIDTH: i32 = 300;
-const WINDOW_HEIGHT: i32 = 100;
+// Reduce both dimensions by 70%, including the waveform itself.
+const OVERLAY_SCALE: f32 = 0.30;
+const WINDOW_WIDTH: i32 = 90;
+const WINDOW_HEIGHT: i32 = 30;
 const WAVEFORM_BAR_COUNT: usize = 15;
 const TRANSPARENT_COLOR: u32 = 0x00FF00FF;
 
@@ -158,7 +160,7 @@ fn create_window() -> anyhow::Result<HWND> {
         }
 
         let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
             class_name.as_ptr(),
             window_title.as_ptr(),
             WS_POPUP,
@@ -190,7 +192,6 @@ fn create_window() -> anyhow::Result<HWND> {
 }
 
 fn run_message_loop(hwnd: HWND, receiver: Receiver<OverlayCommand>) -> anyhow::Result<()> {
-    let (mut target_x, mut target_y) = (0, 0);
     let mut current_y = 0.0_f32;
     let mut visible = false;
     let mut next_frame = Instant::now();
@@ -218,11 +219,9 @@ fn run_message_loop(hwnd: HWND, receiver: Receiver<OverlayCommand>) -> anyhow::R
         };
         match receiver.recv_timeout(wait) {
             Ok(OverlayCommand::Show(state)) => {
-                let position = overlay_position();
-                target_x = position.0;
-                target_y = position.1;
+                let (target_x, target_y) = overlay_position();
                 if !visible {
-                    current_y = (target_y + 12) as f32;
+                    current_y = (target_y + 4) as f32;
                     visible = true;
                 }
                 VISUAL_STATE.with(|visual| {
@@ -272,6 +271,9 @@ fn run_message_loop(hwnd: HWND, receiver: Receiver<OverlayCommand>) -> anyhow::R
         }
 
         if visible && Instant::now() >= next_frame {
+            // Follow the active monitor and reassert the overlay above normal
+            // application windows without stealing the typing focus.
+            let (target_x, target_y) = overlay_position();
             let y_target = target_y as f32;
             current_y += (y_target - current_y) * 0.24;
             if (y_target - current_y).abs() < 1.0 {
@@ -286,7 +288,7 @@ fn run_message_loop(hwnd: HWND, receiver: Receiver<OverlayCommand>) -> anyhow::R
                     current_y.round() as i32,
                     WINDOW_WIDTH,
                     WINDOW_HEIGHT,
-                    SWP_NOACTIVATE,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 ) == 0
                 {
                     return Err(anyhow!(
@@ -377,15 +379,15 @@ unsafe fn draw_waveform(hdc: windows_sys::Win32::Graphics::Gdi::HDC, visual: Vis
     let center_x = WINDOW_WIDTH / 2;
     let center_y = WINDOW_HEIGHT / 2;
     for (index, height) in heights.into_iter().enumerate() {
-        let x = center_x + (index as i32 - (WAVEFORM_BAR_COUNT as i32 - 1) / 2) * 14;
+        let x = center_x + (index as i32 - (WAVEFORM_BAR_COUNT as i32 - 1) / 2) * 4;
         RoundRect(
             hdc,
-            x - 4,
+            x - 1,
             center_y - height / 2,
-            x + 4,
+            x + 1,
             center_y + height / 2,
-            8,
-            8,
+            2,
+            2,
         );
     }
     SelectObject(hdc, previous_brush);
@@ -397,9 +399,9 @@ fn waveform_heights(phase: f32, volume: f32, state: OverlayState) -> [i32; WAVEF
     std::array::from_fn(|index| {
         let wave = ((phase + index as f32 * 0.4).sin() * 0.5 + 0.5).abs();
         let microphone_boost = volume.clamp(0.0, 1.0) * wave * 18.0;
-        ((15.0 + 60.0 * wave + microphone_boost) * scale)
+        ((15.0 + 60.0 * wave + microphone_boost) * scale * OVERLAY_SCALE)
             .round()
-            .clamp(6.0, 90.0) as i32
+            .clamp(2.0, 27.0) as i32
     })
 }
 
@@ -419,7 +421,7 @@ mod tests {
     fn waveform_has_fifteen_bounded_bars() {
         let heights = waveform_heights(1.2, 0.5, OverlayState::Listening);
         assert_eq!(heights.len(), WAVEFORM_BAR_COUNT);
-        assert!(heights.iter().all(|height| (6..=90).contains(height)));
+        assert!(heights.iter().all(|height| (2..=27).contains(height)));
     }
 
     #[test]

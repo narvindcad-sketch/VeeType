@@ -12,10 +12,10 @@ fn vulkan_gpu_device(
     })
 }
 
-pub fn initialize_backend_hardware() -> u32 {
+pub fn vulkan_memory_free() -> Option<u64> {
     let devices = list_llama_ggml_backend_devices();
     for device in &devices {
-        tracing::info!(
+        tracing::debug!(
             name = %device.name,
             description = %device.description,
             backend = %device.backend,
@@ -24,48 +24,7 @@ pub fn initialize_backend_hardware() -> u32 {
             "Detected llama.cpp backend device"
         );
     }
-    let vulkan_device = vulkan_gpu_device(&devices);
-
-    #[cfg(feature = "vulkan")]
-    {
-        if let Some(device) = vulkan_device {
-            tracing::info!(
-                device = %device.description,
-                memory_free = device.memory_free,
-                "Vulkan GPU detected; enabling GPU layer offload"
-            );
-            return 99;
-        }
-        tracing::warn!(
-            "Vulkan is enabled, but no compatible Vulkan GPU was detected; using CPU inference"
-        );
-    }
-
-    #[cfg(not(feature = "vulkan"))]
-    {
-        if let Some(device) = vulkan_device {
-            tracing::info!(
-                device = %device.description,
-                "Vulkan GPU detected but this build uses CPU inference"
-            );
-            return 0;
-        }
-        let gpu_available = devices.iter().any(|device| {
-            matches!(
-                device.device_type,
-                LlamaBackendDeviceType::Gpu | LlamaBackendDeviceType::IntegratedGpu
-            )
-        });
-        if gpu_available {
-            tracing::info!(
-                "GPU device detected but this build has no Vulkan feature; using CPU inference"
-            );
-        } else {
-            tracing::info!("No GPU backend available; using CPU inference");
-        }
-    }
-
-    0
+    vulkan_gpu_device(&devices).map(|device| device.memory_free as u64)
 }
 
 #[cfg(test)]

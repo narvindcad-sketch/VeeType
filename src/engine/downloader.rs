@@ -11,6 +11,14 @@ use anyhow::Context;
 
 pub const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
 
+fn model_url(file_name: &str) -> String {
+    match file_name {
+        "parakeet-unified-en-0.6b-Q8_0.gguf" =>
+            "https://blob.handy.computer/handy-computer/parakeet-unified-en-0.6b-gguf/7e948f21b7bdbac698d3318db9d350f1096f3b6c/parakeet-unified-en-0.6b-Q8_0.gguf".to_string(),
+        _ => format!("{MODEL_BASE_URL}{file_name}"),
+    }
+}
+
 pub struct Download {
     downloaded: AtomicU64,
     total: AtomicU64,
@@ -44,7 +52,7 @@ impl Download {
             finished: AtomicBool::new(false),
             error: Mutex::new(None),
         });
-        let url = format!("{MODEL_BASE_URL}{file_name}");
+        let url = model_url(file_name);
         let destination = models_dir.join(file_name);
         let worker = Arc::clone(&download);
         std::thread::spawn(move || {
@@ -112,5 +120,19 @@ impl Download {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_handys_parakeet_model_to_its_publisher() {
+        assert_eq!(
+            model_url("parakeet-unified-en-0.6b-Q8_0.gguf"),
+            "https://blob.handy.computer/handy-computer/parakeet-unified-en-0.6b-gguf/7e948f21b7bdbac698d3318db9d350f1096f3b6c/parakeet-unified-en-0.6b-Q8_0.gguf"
+        );
+        assert!(model_url("ggml-base.en.bin").starts_with(MODEL_BASE_URL));
     }
 }

@@ -20,7 +20,7 @@ impl CloudLlm {
                     "groq",
                     "https://api.groq.com/openai/v1/chat/completions",
                     "GROQ_API_KEY",
-                    "llama-3.3-70b-versatile",
+                    "openai/gpt-oss-20b",
                 )
             } else if config.provider().eq_ignore_ascii_case("anthropic") {
                 (

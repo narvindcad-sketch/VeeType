@@ -1,5 +1,6 @@
 //! Audio capture, transcription, and text-polishing backend modules.
 
+pub mod adaptive;
 pub mod audio;
 pub mod cloud;
 pub mod downloader;
@@ -9,6 +10,7 @@ pub mod launcher;
 pub mod license;
 pub mod llm;
 pub mod startup;
+pub mod text_cleanup;
 pub mod updater;
 
 pub use keychain::KeyVault;

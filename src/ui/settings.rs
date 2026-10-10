@@ -1455,6 +1455,16 @@ struct CatalogModel {
 
 static MODEL_CATALOG: &[CatalogModel] = &[
     CatalogModel {
+        name: "Parakeet Unified EN 0.6B",
+        description: "Handy-compatible English model with fast, accurate transcription.",
+        file: "parakeet-unified-en-0.6b-Q8_0.gguf",
+        size: "731 MB",
+        languages: "English",
+        speed: 0.95,
+        accuracy: 0.94,
+        recommended: true,
+    },
+    CatalogModel {
         name: "Whisper Large v3 Turbo",
         description: "Best offline accuracy, optimized for speed.",
         file: "ggml-large-v3-turbo.bin",
@@ -2660,7 +2670,10 @@ mod catalog_tests {
     fn catalog_files_are_unique_ggml_names() {
         let mut seen = std::collections::HashSet::new();
         for model in MODEL_CATALOG {
-            assert!(model.file.starts_with("ggml-") && model.file.ends_with(".bin"));
+            assert!(
+                (model.file.starts_with("ggml-") && model.file.ends_with(".bin"))
+                    || model.file.ends_with(".gguf")
+            );
             assert!(seen.insert(model.file), "duplicate {}", model.file);
         }
         assert!(MODEL_CATALOG.len() >= 30);
