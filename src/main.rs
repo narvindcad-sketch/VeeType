@@ -333,10 +333,14 @@ fn transcribe_with_engine(
             state, samples, language, translate_to_english, prompt, n_threads,
         ),
         SpeechEngine::Universal { session, architecture, .. } => {
+            // The currently shipped universal model is Parakeet. It is an
+            // English transcription model and has no translation head. The
+            // global translation preference belongs to Whisper, so forwarding
+            // it here makes the runtime reject dictation as an unsupported
+            // task (the preference defaults to `true` in older installations).
             let options = transcribe_cpp::RunOptions {
-                task: if translate_to_english { transcribe_cpp::Task::Translate } else { transcribe_cpp::Task::Transcribe },
+                task: universal_transcription_task(translate_to_english),
                 language: (!language.eq_ignore_ascii_case("auto")).then(|| language.to_string()),
-                target_language: translate_to_english.then(|| "en".to_string()),
                 ..Default::default()
             };
             session.run(samples, &options)
@@ -344,6 +348,13 @@ fn transcribe_with_engine(
                 .map_err(|error| anyhow::anyhow!("{architecture} transcription failed: {error}"))
         }
     }
+}
+
+fn universal_transcription_task(_translate_to_english: bool) -> transcribe_cpp::Task {
+    // Universal models advertise their capabilities at runtime. Until a
+    // translation-capable universal model is added, transcription is the one
+    // supported and reliable operation for this engine family.
+    transcribe_cpp::Task::Transcribe
 }
 
 fn ensure_whisper_engine(
@@ -908,7 +919,17 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
         }
 
         overlay.show(OverlayState::Processing)?;
-        ensure_whisper_engine(&mut whisper_engine, &whisper_model_path, &mut whisper_scheduler)?;
+        if let Err(error) =
+            ensure_whisper_engine(&mut whisper_engine, &whisper_model_path, &mut whisper_scheduler)
+        {
+            tracing::error!(error = %error, "Speech engine could not be initialized");
+            overlay.hide()?;
+            show_error_dialog(
+                "VeeType could not start speech recognition",
+                &format!("{error:#}\n\nOpen Settings to select or download a compatible speech model."),
+            );
+            continue;
+        }
         last_model_use = Some(Instant::now());
         let mut actual_backend = whisper_engine.as_ref().expect("Whisper engine loaded").backend;
         let mut transcription_started = Instant::now();
@@ -940,7 +961,18 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
             backend = ?actual_backend,
             "Whisper transcription completed"
         );
-        let raw_text = transcription_result?;
+        let raw_text = match transcription_result {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::error!(error = %error, "Speech recognition failed; VeeType will remain available");
+                overlay.hide()?;
+                show_error_dialog(
+                    "VeeType could not recognize that dictation",
+                    &format!("{error:#}\n\nVeeType is still running. Try again, or check the microphone and model in Settings."),
+                );
+                continue;
+            }
+        };
         let trimmed_raw = raw_text.trim();
         if !trimmed_raw.is_empty() && engine::launcher::evaluate_and_launch(trimmed_raw, &config.voice_commands) {
             tracing::info!("Voice launch command handled; skipping text insertion");
@@ -1046,7 +1078,7 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::installed_whisper_model;
+    use super::{installed_whisper_model, universal_transcription_task};
     use crate::config::{AppConfig, PromptMode, Prompts};
     use crate::engine::audio::{apply_vocabulary, vocabulary_prompt};
     use std::collections::HashMap;
@@ -1200,5 +1232,13 @@ mod tests {
             Some(selected)
         );
         std::fs::remove_dir_all(app_dir).unwrap();
+    }
+
+    #[test]
+    fn universal_models_transcribe_when_legacy_translation_is_enabled() {
+        assert_eq!(
+            universal_transcription_task(true),
+            transcribe_cpp::Task::Transcribe
+        );
     }
 }
