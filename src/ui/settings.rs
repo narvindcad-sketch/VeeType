@@ -8,7 +8,7 @@ use eframe::egui;
 
 use crate::config::{load_config, save_config, AppConfig, AppProfile};
 use crate::engine::downloader::Download;
-use crate::engine::{Entitlements, KeyVault, LicenseManager, OtaUpdater};
+use crate::engine::{KeyVault, OtaUpdater};
 use crate::utils::hotkey::{is_hotkey_pressed, is_valid_hotkey, pressed_hotkey};
 
 pub fn run(app_dir: PathBuf) -> anyhow::Result<()> {
@@ -93,14 +93,6 @@ struct SettingsApp {
     update_rx: Receiver<String>,
     update_tx: Sender<String>,
     update_checking: bool,
-    license_entitlements: Entitlements,
-    license_signed_in: bool,
-    license_email: String,
-    license_password: String,
-    license_status: String,
-    license_rx: Receiver<String>,
-    license_tx: Sender<String>,
-    license_busy: bool,
     alias_name: String,
     alias_path: String,
     advanced_open: bool,
@@ -161,10 +153,6 @@ impl Tab {
 impl SettingsApp {
     fn new(app_dir: PathBuf, config: AppConfig, logo: egui::TextureHandle) -> Self {
         let (update_tx, update_rx) = mpsc::channel();
-        let (license_tx, license_rx) = mpsc::channel();
-        let license_signed_in = false;
-        let license_entitlements = Entitlements::unlocked();
-        let license_status = "All VeeType capabilities are included.".to_string();
         let models_dir = app_dir.join("Models");
         let input_devices = match list_input_devices() {
             Ok(devices) => devices,
@@ -197,14 +185,6 @@ impl SettingsApp {
             update_rx,
             update_tx,
             update_checking: false,
-            license_entitlements,
-            license_signed_in,
-            license_email: String::new(),
-            license_password: String::new(),
-            license_status,
-            license_rx,
-            license_tx,
-            license_busy: false,
             alias_name: String::new(),
             alias_path: String::new(),
             advanced_open: false,
@@ -224,53 +204,6 @@ impl SettingsApp {
             profile_exe: String::new(),
             downloads: Default::default(),
         }
-    }
-
-    fn start_license_action(&mut self, create_account: bool) {
-        if self.license_email.trim().is_empty() || self.license_password.is_empty() {
-            self.license_status = "Enter your account email and password first.".into();
-            return;
-        }
-
-        let email = self.license_email.trim().to_string();
-        let password = std::mem::take(&mut self.license_password);
-        let sender = self.license_tx.clone();
-        self.license_busy = true;
-        self.license_status = if create_account {
-            "Creating account...".into()
-        } else {
-            "Signing in and checking subscription...".into()
-        };
-        std::thread::spawn(move || {
-            let result = LicenseManager::sign_in(&email, &password, create_account);
-            let message =
-                result.unwrap_or_else(|error| format!("Account/license error: {error:#}"));
-            let _ = sender.send(message);
-        });
-    }
-
-    fn refresh_license(&mut self) {
-        let sender = self.license_tx.clone();
-        self.license_busy = true;
-        self.license_status = "Refreshing Pro license...".into();
-        std::thread::spawn(move || {
-            let result = LicenseManager::refresh_license();
-            let message =
-                result.unwrap_or_else(|error| format!("License refresh failed: {error:#}"));
-            let _ = sender.send(message);
-        });
-    }
-
-    fn open_checkout(&mut self) {
-        let sender = self.license_tx.clone();
-        self.license_busy = true;
-        self.license_status = "Opening secure checkout...".into();
-        std::thread::spawn(move || {
-            let result = LicenseManager::open_checkout();
-            let message =
-                result.unwrap_or_else(|error| format!("Could not open checkout: {error:#}"));
-            let _ = sender.send(message);
-        });
     }
 
     fn save(&mut self) {
@@ -929,30 +862,10 @@ impl eframe::App for SettingsApp {
             self.update_status = message;
             self.update_checking = false;
         }
-        if let Ok(message) = self.license_rx.try_recv() {
-            self.license_status = message;
-            self.license_busy = false;
-            match LicenseManager::cached_entitlements() {
-                Ok(Some(entitlements)) => self.license_entitlements = entitlements,
-                Ok(None) => self.license_entitlements = Entitlements::fallback(),
-                Err(error) => {
-                    tracing::warn!(error = %error, "Could not verify refreshed Pro license");
-                    self.license_entitlements = Entitlements::fallback();
-                    self.license_status = format!("License was not accepted: {error:#}");
-                }
-            }
-            self.license_signed_in = match LicenseManager::has_session() {
-                Ok(signed_in) => signed_in,
-                Err(error) => {
-                    tracing::warn!(error = %error, "Could not read updated Supabase session");
-                    false
-                }
-            };
-        }
         if self.capture_hotkey {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
         }
-        if self.license_busy || self.update_checking {
+        if self.update_checking {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 

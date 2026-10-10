@@ -14,7 +14,7 @@ pub mod text_cleanup;
 pub mod updater;
 
 pub use keychain::KeyVault;
-pub use license::{effective_provider, hands_free_enabled, Entitlements, LicenseManager};
+pub use license::{effective_provider, hands_free_enabled};
 pub use updater::OtaUpdater;
 
 pub fn worker_thread_count() -> usize {

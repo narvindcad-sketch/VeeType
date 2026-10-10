@@ -1,4 +1,6 @@
-#![cfg_attr(feature = "test-bypass", allow(dead_code))]
+// The account and subscription implementation is retained for a possible
+// future edition change, but VeeType currently ships as one complete edition.
+#![allow(dead_code)]
 use anyhow::{bail, Context};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
