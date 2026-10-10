@@ -41,7 +41,7 @@ use engine::audio::{
 };
 use engine::cloud::CloudLlm;
 use engine::adaptive::{AdaptiveBackend, ComputeBackend};
-use engine::license::{Entitlements, LicenseManager};
+use engine::license::Entitlements;
 use engine::llm::{apply_voice_commands, LocalLlm};
 use engine::{effective_provider, hands_free_enabled};
 use ui::{Overlay, OverlayState};
@@ -526,14 +526,9 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
             tracing::warn!(error = %error, "Could not refresh the Windows auto-start command");
         }
     }
-    let entitlements = match LicenseManager::cached_entitlements() {
-        Ok(Some(entitlements)) => entitlements,
-        Ok(None) => Entitlements::fallback(),
-        Err(error) => {
-            tracing::warn!(error = %error, "Cached Pro license is unavailable; using free features");
-            Entitlements::fallback()
-        }
-    };
+    // VeeType is a single, fully included edition. Cloud providers still use
+    // the account owner's API key, but no VeeType license is required.
+    let entitlements = Entitlements::unlocked();
     if !is_valid_hotkey(config.settings.hotkey.trim()) {
         anyhow::bail!(
             "Unsupported settings.hotkey value: {:?}",
@@ -569,16 +564,7 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
     let max_new_tokens = config.settings.max_tokens;
     let selected_provider = config.provider();
     let effective_provider = effective_provider(selected_provider, &entitlements);
-    if effective_provider != selected_provider {
-        tracing::warn!(
-            provider = selected_provider,
-            "Cloud provider requires an active Pro license; using local polishing"
-        );
-    }
     let hands_free_enabled = hands_free_enabled(config.settings.hands_free, &entitlements);
-    if config.settings.hands_free && !hands_free_enabled {
-        tracing::warn!("Hands-free mode requires an active Pro license; using push-to-talk");
-    }
     tracing::info!(
         hotkey = %config.settings.hotkey,
         max_tokens = max_new_tokens,

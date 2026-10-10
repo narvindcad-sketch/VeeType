@@ -17,7 +17,7 @@ const LICENSE_ISSUER: &str = "veetype-license";
 const LICENSE_AUDIENCE: &str = "veetype-desktop";
 const PRO_FEATURES: [&str; 3] = ["cloud_providers", "hands_free", "large_models"];
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Entitlements {
     pub cloud_providers: bool,
     pub hands_free: bool,
@@ -30,7 +30,7 @@ impl Entitlements {
     }
 
     pub fn fallback() -> Self {
-        Self::all(cfg!(feature = "test-bypass"))
+        Self::unlocked()
     }
 
     fn all(enabled: bool) -> Self {
@@ -46,23 +46,21 @@ impl Entitlements {
     }
 }
 
-pub fn effective_provider<'a>(
-    configured_provider: &'a str,
-    entitlements: &Entitlements,
-) -> &'a str {
-    if matches!(
-        configured_provider.to_ascii_lowercase().as_str(),
-        "groq" | "openai" | "anthropic"
-    ) && !entitlements.cloud_providers
-    {
-        "local"
-    } else {
-        configured_provider
+impl Default for Entitlements {
+    fn default() -> Self {
+        Self::unlocked()
     }
 }
 
-pub fn hands_free_enabled(configured: bool, entitlements: &Entitlements) -> bool {
-    configured && entitlements.hands_free
+pub fn effective_provider<'a>(
+    configured_provider: &'a str,
+    _entitlements: &Entitlements,
+) -> &'a str {
+    configured_provider
+}
+
+pub fn hands_free_enabled(configured: bool, _entitlements: &Entitlements) -> bool {
+    configured
 }
 
 #[derive(Deserialize, Serialize)]
@@ -473,11 +471,11 @@ mod tests {
     }
 
     #[test]
-    fn free_tier_keeps_local_dictation_but_disables_pro_features() {
-        let free = Entitlements::default();
+    fn all_features_are_available_without_a_license() {
+        let included = Entitlements::default();
 
-        assert_eq!(effective_provider("local", &free), "local");
-        assert_eq!(effective_provider("openai", &free), "local");
-        assert!(!hands_free_enabled(true, &free));
+        assert_eq!(effective_provider("local", &included), "local");
+        assert_eq!(effective_provider("openai", &included), "openai");
+        assert!(hands_free_enabled(true, &included));
     }
 }

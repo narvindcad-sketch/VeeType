@@ -162,31 +162,9 @@ impl SettingsApp {
     fn new(app_dir: PathBuf, config: AppConfig, logo: egui::TextureHandle) -> Self {
         let (update_tx, update_rx) = mpsc::channel();
         let (license_tx, license_rx) = mpsc::channel();
-        let license_signed_in = match LicenseManager::has_session() {
-            Ok(signed_in) => signed_in,
-            Err(error) => {
-                tracing::warn!(error = %error, "Could not read saved Supabase session");
-                false
-            }
-        };
-        let (license_entitlements, license_status) = match LicenseManager::cached_entitlements() {
-            Ok(Some(entitlements)) => (
-                entitlements,
-                LicenseManager::account_status()
-                    .unwrap_or_else(|error| format!("License status error: {error:#}")),
-            ),
-            Ok(None) => (
-                Entitlements::fallback(),
-                "No active Pro license is stored on this device.".into(),
-            ),
-            Err(error) => {
-                tracing::warn!(error = %error, "Could not verify cached Pro license");
-                (
-                    Entitlements::fallback(),
-                    format!("Cached Pro license is not valid: {error:#}"),
-                )
-            }
-        };
+        let license_signed_in = false;
+        let license_entitlements = Entitlements::unlocked();
+        let license_status = "All VeeType capabilities are included.".to_string();
         let models_dir = app_dir.join("Models");
         let input_devices = match list_input_devices() {
             Ok(devices) => devices,
@@ -544,15 +522,10 @@ impl SettingsApp {
                 .selected_text(&self.provider)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.provider, "local".to_string(), "local");
-                    ui.add_enabled_ui(self.license_entitlements.cloud_providers, |ui| {
-                        for provider in ["groq", "openai", "anthropic"] {
-                            ui.selectable_value(&mut self.provider, provider.to_string(), provider);
-                        }
-                    });
+                    for provider in ["groq", "openai", "anthropic"] {
+                        ui.selectable_value(&mut self.provider, provider.to_string(), provider);
+                    }
                 });
-            if !self.license_entitlements.cloud_providers {
-                ui.label("Cloud providers require an active Pro license.");
-            }
             ui.horizontal_wrapped(|ui| {
                 ui.label("Model override");
                 ui.text_edit_singleline(&mut self.model);
@@ -1018,11 +991,7 @@ impl eframe::App for SettingsApp {
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    let (plan, color) = if self.license_entitlements.is_pro() {
-                        ("PRO", ACCENT)
-                    } else {
-                        ("FREE", MUTED)
-                    };
+                    let (plan, color) = ("FULL EDITION", ACCENT);
                     ui.add_space(8.0);
                     egui::Frame::none()
                         .fill(CARD)
@@ -1168,13 +1137,12 @@ impl eframe::App for SettingsApp {
                         &mut self.config.settings.noise_suppression,
                         true,
                     );
-                    let hands_free = self.license_entitlements.hands_free;
                     toggle_row(
                         ui,
                         "Hands-free mode",
-                        if hands_free { "Stop recording after silence." } else { "Requires a Pro license." },
+                        "Stop recording after silence.",
                         &mut self.config.settings.hands_free,
-                        hands_free,
+                        true,
                     );
                     row_card(ui, "Silence timeout (ms)", "", |ui| {
                         ui.add(egui::Slider::new(
@@ -1198,71 +1166,9 @@ impl eframe::App for SettingsApp {
                 }
 
                 if self.tab == Tab::Home {
-                if !cfg!(feature = "test-bypass") {
-                section(ui, "Your VeeType account", |ui| {
-                    ui.label(&self.license_status);
-                    ui.horizontal(|ui| {
-                        ui.label("Email");
-                        ui.text_edit_singleline(&mut self.license_email);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Password");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.license_password).password(true),
-                        );
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        if ui
-                            .add_enabled(!self.license_busy, egui::Button::new("Sign in"))
-                            .clicked()
-                        {
-                            self.start_license_action(false);
-                        }
-                        if ui
-                            .add_enabled(!self.license_busy, egui::Button::new("Create account"))
-                            .clicked()
-                        {
-                            self.start_license_action(true);
-                        }
-                        if ui
-                            .add_enabled(!self.license_busy, egui::Button::new("Refresh license"))
-                            .clicked()
-                        {
-                            self.refresh_license();
-                        }
-                        if ui
-                            .add_enabled(
-                                !self.license_busy && self.license_signed_in,
-                                egui::Button::new("Subscribe / renew"),
-                            )
-                            .clicked()
-                        {
-                            self.open_checkout();
-                        }
-                        if ui
-                            .add_enabled(
-                                !self.license_busy && self.license_signed_in,
-                                egui::Button::new("Sign out"),
-                            )
-                            .clicked()
-                        {
-                            match LicenseManager::sign_out() {
-                                Ok(()) => {
-                                    self.license_entitlements = Entitlements::default();
-                                    self.license_status =
-                                        "Signed out. Restart VeeType to disable Pro features."
-                                            .into();
-                                }
-                                Err(error) => {
-                                    self.license_status =
-                                        format!("Could not sign out: {error:#}");
-                                }
-                            }
-                        }
-                    });
-                    ui.label("Pro unlocks cloud providers, hands-free mode, and larger local models. Basic local dictation stays free.");
+                section(ui, "One complete edition", |ui| {
+                    ui.label("Every VeeType feature is included: local models, hands-free dictation, and cloud polishing with your own API key.");
                 });
-                }
                 section(ui, "Software updates", |ui| {
                     ui.horizontal(|ui| {
                         ui.label(format!("Current version: v{}", env!("CARGO_PKG_VERSION")));
@@ -2202,7 +2108,6 @@ impl SettingsApp {
             self.advanced_open = !self.advanced_open;
         }
         if self.advanced_open {
-            let hands_free_ok = self.license_entitlements.hands_free;
             toggle_row(
                 ui,
                 "Noise suppression",
@@ -2212,10 +2117,10 @@ impl SettingsApp {
             );
             toggle_row(
                 ui,
-                "Hands-free (Pro)",
-                "Stop recording after silence. Requires Pro.",
+                "Hands-free",
+                "Stop recording after silence.",
                 &mut self.config.settings.hands_free,
-                hands_free_ok,
+                true,
             );
             toggle_row(
                 ui,
@@ -2489,9 +2394,9 @@ const FEATURES: [Feature; 11] = [
     Feature { icon: Icon::Layers, label: "App profiles", text: "Choose a writing mode for each application you dictate into." },
     Feature { icon: Icon::Chip, label: "Local models", text: "Whisper models run on your own PC, with no audio uploaded." },
     Feature { icon: Icon::Globe, label: "Languages", text: "Dictate in many languages, or let VeeType detect them automatically." },
-    Feature { icon: Icon::Cloud, label: "Cloud polish", text: "Pro: tidy transcripts with a cloud model using your own key." },
-    Feature { icon: Icon::Key, label: "Your own keys", text: "Pro: bring your own Groq or OpenAI key. Only text is ever sent." },
-    Feature { icon: Icon::Clock, label: "Hands-free", text: "Pro: stop recording automatically after you pause speaking." },
+    Feature { icon: Icon::Cloud, label: "Cloud polish", text: "Tidy transcripts with a cloud model using your own key." },
+    Feature { icon: Icon::Key, label: "Your own keys", text: "Bring your own Groq, OpenAI, or Anthropic key. Only text is ever sent." },
+    Feature { icon: Icon::Clock, label: "Hands-free", text: "Stop recording automatically after you pause speaking." },
 ];
 
 fn wizard_steps_labels(ui: &mut egui::Ui, current: u8) {
