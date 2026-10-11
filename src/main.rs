@@ -2,9 +2,9 @@
 
 mod config;
 mod engine;
+mod text_input;
 mod ui;
 mod utils;
-mod text_input;
 
 use anyhow::Context;
 use config::{load_config, PromptMode};
@@ -27,20 +27,18 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey,
-};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetForegroundWindow, GetWindowTextW, MessageBoxW,
     MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MB_ICONERROR, MB_OK, MSG,
     MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WM_HOTKEY, WM_QUIT,
 };
 
+use engine::adaptive::{AdaptiveBackend, ComputeBackend};
 use engine::audio::{
     apply_vocabulary, transcribe_audio, transcribe_media_file, vocabulary_prompt, AudioCapture,
 };
 use engine::cloud::CloudLlm;
-use engine::adaptive::{AdaptiveBackend, ComputeBackend};
 use engine::license::Entitlements;
 use engine::llm::{apply_voice_commands, LocalLlm};
 use engine::{effective_provider, hands_free_enabled};
@@ -70,11 +68,14 @@ impl SingleInstanceGuard {
             );
         }
         let config_event_name = wide(CONFIG_EVENT_NAME);
-        let config_event = unsafe { CreateEventW(std::ptr::null(), 0, 0, config_event_name.as_ptr()) };
+        let config_event =
+            unsafe { CreateEventW(std::ptr::null(), 0, 0, config_event_name.as_ptr()) };
         if config_event == 0 {
             let error = unsafe { GetLastError() };
             unsafe { CloseHandle(wake_event) };
-            anyhow::bail!("Could not create the VeeType configuration event (Windows error {error})");
+            anyhow::bail!(
+                "Could not create the VeeType configuration event (Windows error {error})"
+            );
         }
 
         let mutex_name = wide(MUTEX_NAME);
@@ -123,7 +124,11 @@ impl SingleInstanceGuard {
             return Ok(None);
         }
 
-        Ok(Some(Self { mutex, wake_event, config_event }))
+        Ok(Some(Self {
+            mutex,
+            wake_event,
+            config_event,
+        }))
     }
 }
 
@@ -181,9 +186,9 @@ fn installed_whisper_model(app_dir: &Path, preferred: &str) -> Option<PathBuf> {
     let models_dir = app_dir.join("Models");
     let selected = models_dir.join(preferred.trim());
     if selected.is_file()
-        && selected
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
+        && selected.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("bin") || extension.eq_ignore_ascii_case("gguf")
+        })
     {
         return Some(selected);
     }
@@ -196,7 +201,13 @@ fn installed_whisper_model(app_dir: &Path, preferred: &str) -> Option<PathBuf> {
 fn input_device_config(
     host: &cpal::Host,
     selected_name: Option<&str>,
-) -> anyhow::Result<(cpal::Device, cpal::StreamConfig, cpal::SampleFormat, u32, usize)> {
+) -> anyhow::Result<(
+    cpal::Device,
+    cpal::StreamConfig,
+    cpal::SampleFormat,
+    u32,
+    usize,
+)> {
     let device = match selected_name.filter(|name| !name.trim().is_empty()) {
         Some(selected_name) => match host
             .input_devices()?
@@ -227,7 +238,13 @@ fn input_device_config(
     let stream_config: cpal::StreamConfig = supported_config.into();
     let native_sample_rate = stream_config.sample_rate.0;
     let channels = stream_config.channels as usize;
-    Ok((device, stream_config, sample_format, native_sample_rate, channels))
+    Ok((
+        device,
+        stream_config,
+        sample_format,
+        native_sample_rate,
+        channels,
+    ))
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -270,7 +287,13 @@ fn wait_for_windows_activity(
 ) -> anyhow::Result<WindowsActivity> {
     let handles = [wake_event, config_event];
     let result = unsafe {
-        MsgWaitForMultipleObjectsEx(2, handles.as_ptr(), timeout_ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+        MsgWaitForMultipleObjectsEx(
+            2,
+            handles.as_ptr(),
+            timeout_ms,
+            QS_ALLINPUT,
+            MWMO_INPUTAVAILABLE,
+        )
     };
     if result == WAIT_OBJECT_0 {
         return Ok(WindowsActivity::OpenSettings);
@@ -304,6 +327,9 @@ enum SpeechEngine {
         _context: WhisperContext,
         state: whisper_rs::WhisperState,
     },
+    Parakeet {
+        worker: engine::parakeet::ParakeetWorker,
+    },
 }
 
 struct LoadedWhisper {
@@ -315,13 +341,40 @@ fn load_whisper_engine(
     whisper_model_path: &Path,
     requested_backend: ComputeBackend,
 ) -> anyhow::Result<LoadedWhisper> {
+    if whisper_model_path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+    {
+        let worker = match engine::parakeet::ParakeetWorker::spawn(
+            whisper_model_path,
+            requested_backend == ComputeBackend::Gpu,
+            engine::worker_thread_count(),
+        ) {
+            Ok(worker) => worker,
+            Err(gpu_error) if requested_backend == ComputeBackend::Gpu => {
+                tracing::warn!(
+                    error = %gpu_error,
+                    "Parakeet GPU worker failed; retrying in an isolated CPU worker"
+                );
+                return load_whisper_engine(whisper_model_path, ComputeBackend::Cpu);
+            }
+            Err(error) => return Err(error),
+        };
+        tracing::info!(
+            backend = ?requested_backend,
+            architecture = worker.architecture(),
+            "Parakeet model loaded in isolated worker"
+        );
+        return Ok(LoadedWhisper {
+            engine: SpeechEngine::Parakeet { worker },
+            backend: requested_backend,
+        });
+    }
     let mut ctx_params = WhisperContextParameters::default();
     ctx_params.use_gpu(requested_backend == ComputeBackend::Gpu);
     let mut actual_backend = requested_backend;
     let whisper_ctx = match WhisperContext::new_with_params(whisper_model_path, ctx_params) {
-        Ok(context) => {
-            context
-        }
+        Ok(context) => context,
         Err(gpu_error) if requested_backend == ComputeBackend::Gpu => {
             tracing::warn!(
                 error = %gpu_error,
@@ -353,11 +406,16 @@ fn load_whisper_engine(
             drop(whisper_ctx);
             return load_whisper_engine(whisper_model_path, ComputeBackend::Cpu);
         }
-        Err(error) => return Err(error).context("Failed to initialize Whisper transcription state"),
+        Err(error) => {
+            return Err(error).context("Failed to initialize Whisper transcription state")
+        }
     };
     tracing::info!(backend = ?actual_backend, "Whisper model loaded");
     Ok(LoadedWhisper {
-        engine: SpeechEngine::Whisper { _context: whisper_ctx, state: whisper_state },
+        engine: SpeechEngine::Whisper {
+            _context: whisper_ctx,
+            state: whisper_state,
+        },
         backend: actual_backend,
     })
 }
@@ -372,23 +430,40 @@ fn transcribe_with_engine(
 ) -> anyhow::Result<String> {
     match &mut loaded.engine {
         SpeechEngine::Whisper { state, .. } => transcribe_audio(
-            state, samples, language, translate_to_english, prompt, n_threads,
+            state,
+            samples,
+            language,
+            translate_to_english,
+            prompt,
+            n_threads,
         ),
+        SpeechEngine::Parakeet { worker } => worker.transcribe(samples),
     }
 }
 
 fn ensure_whisper_engine(
-    engine: &mut Option<LoadedWhisper>, path: &Path, scheduler: &mut AdaptiveBackend,
+    engine: &mut Option<LoadedWhisper>,
+    path: &Path,
+    scheduler: &mut AdaptiveBackend,
 ) -> anyhow::Result<()> {
-    let resident_gpu = engine.as_ref().is_some_and(|engine| engine.backend == ComputeBackend::Gpu);
+    let resident_gpu = engine
+        .as_ref()
+        .is_some_and(|engine| engine.backend == ComputeBackend::Gpu);
     let requested = scheduler.select(fs::metadata(path)?.len(), resident_gpu);
-    if engine.as_ref().is_some_and(|engine| engine.backend == requested) { return Ok(()); }
+    if engine
+        .as_ref()
+        .is_some_and(|engine| engine.backend == requested)
+    {
+        return Ok(());
+    }
     // Release the previous backend before allocating its replacement.
     *engine = None;
     let loaded = load_whisper_engine(path, requested)?;
     if requested == ComputeBackend::Gpu && loaded.backend == ComputeBackend::Cpu {
         scheduler.gpu_failed();
-    } else { scheduler.activate(loaded.backend); }
+    } else {
+        scheduler.activate(loaded.backend);
+    }
     *engine = Some(loaded);
     Ok(())
 }
@@ -472,6 +547,9 @@ fn initialize_logging() -> anyhow::Result<tracing_appender::non_blocking::Worker
 }
 
 fn main() {
+    if let Some(exit_code) = engine::parakeet::maybe_run_from_arguments() {
+        std::process::exit(exit_code);
+    }
     let is_background = std::env::args().any(|argument| argument == "--background");
     let is_auxiliary_window =
         std::env::args().any(|argument| argument == "--settings" || argument == "--vault");
@@ -537,7 +615,11 @@ fn main() {
     }
 }
 
-fn run_app(wake_event: HANDLE, config_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> {
+fn run_app(
+    wake_event: HANDLE,
+    config_event: HANDLE,
+    show_control_center: bool,
+) -> anyhow::Result<()> {
     let app_dir = application_directory()?;
     let mut config = load_config(&app_dir)?;
     let whisper_model_available =
@@ -698,9 +780,7 @@ fn run_app(wake_event: HANDLE, config_event: HANDLE, show_control_center: bool) 
     loop {
         let mut quit_requested = false;
         loop {
-            if last_model_use.is_some_and(|used_at| {
-                used_at.elapsed() >= Duration::from_secs(900)
-            }) {
+            if last_model_use.is_some_and(|used_at| used_at.elapsed() >= Duration::from_secs(900)) {
                 // Keep the model warm across a normal dictation session, then
                 // return the large model allocations to the OS and GPU.
                 whisper_engine = None;
@@ -752,17 +832,29 @@ fn run_app(wake_event: HANDLE, config_event: HANDLE, show_control_center: bool) 
                         )
                         .pick_file()
                     {
-                        ensure_whisper_engine(&mut whisper_engine, &whisper_model_path, &mut whisper_scheduler)?;
+                        ensure_whisper_engine(
+                            &mut whisper_engine,
+                            &whisper_model_path,
+                            &mut whisper_scheduler,
+                        )?;
                         last_model_use = Some(Instant::now());
                         let result = match &mut whisper_engine
                             .as_mut()
-                            .expect("Speech engine was just initialized").engine
+                            .expect("Speech engine was just initialized")
+                            .engine
                         {
                             SpeechEngine::Whisper { state, .. } => transcribe_media_file(
-                                &path, state, &config.settings.language,
-                                config.settings.translate_to_english, &whisper_prompt,
-                                &config.vocabulary, whisper_scheduler.thread_count(),
+                                &path,
+                                state,
+                                &config.settings.language,
+                                config.settings.translate_to_english,
+                                &whisper_prompt,
+                                &config.vocabulary,
+                                whisper_scheduler.thread_count(),
                             ),
+                            SpeechEngine::Parakeet { .. } => Err(anyhow::anyhow!(
+                                "Media-file transcription currently requires a Whisper model"
+                            )),
                         };
                         match result {
                             Ok(transcript_path) => {
@@ -786,76 +878,87 @@ fn run_app(wake_event: HANDLE, config_event: HANDLE, show_control_center: bool) 
             }
             match wait_for_windows_activity(wake_event, config_event, 30_000)? {
                 WindowsActivity::SettingsChanged => {
-                let updated_modified = fs::metadata(app_dir.join("config.toml"))
-                    .and_then(|metadata| metadata.modified())
-                    .ok();
-                if updated_modified != config_modified {
-                    config_modified = updated_modified;
-                    match load_config(&app_dir) {
-                        Ok(updated_config) if is_valid_hotkey(updated_config.settings.hotkey.trim()) => {
-                            if updated_config.settings.hotkey != config.settings.hotkey {
-                                drop(registered_hotkey);
-                                registered_hotkey = match RegisteredHotkey::register(&updated_config.settings.hotkey) {
-                                    Ok(hotkey) => hotkey,
-                                    Err(error) => {
-                                        show_error_dialog("Could not apply VeeType hotkey", &format!("{error:#}"));
-                                        RegisteredHotkey::register(&config.settings.hotkey)?
+                    let updated_modified = fs::metadata(app_dir.join("config.toml"))
+                        .and_then(|metadata| metadata.modified())
+                        .ok();
+                    if updated_modified != config_modified {
+                        config_modified = updated_modified;
+                        match load_config(&app_dir) {
+                            Ok(updated_config)
+                                if is_valid_hotkey(updated_config.settings.hotkey.trim()) =>
+                            {
+                                if updated_config.settings.hotkey != config.settings.hotkey {
+                                    drop(registered_hotkey);
+                                    registered_hotkey = match RegisteredHotkey::register(
+                                        &updated_config.settings.hotkey,
+                                    ) {
+                                        Ok(hotkey) => hotkey,
+                                        Err(error) => {
+                                            show_error_dialog(
+                                                "Could not apply VeeType hotkey",
+                                                &format!("{error:#}"),
+                                            );
+                                            RegisteredHotkey::register(&config.settings.hotkey)?
+                                        }
+                                    };
+                                }
+                                let new_model = installed_whisper_model(
+                                    &app_dir,
+                                    &updated_config.settings.whisper_model,
+                                );
+                                if new_model
+                                    .as_ref()
+                                    .is_some_and(|path| path != &whisper_model_path)
+                                {
+                                    whisper_model_path = new_model.expect("model path was checked");
+                                    whisper_engine = None;
+                                    last_model_use = None;
+                                }
+                                hands_free_enabled = engine::hands_free_enabled(
+                                    updated_config.settings.hands_free,
+                                    &entitlements,
+                                );
+                                silence_limit = (16_000_u64
+                                    * updated_config.settings.silence_timeout_ms.clamp(1, 60_000)
+                                    / 1_000)
+                                    as usize;
+                                whisper_prompt = vocabulary_prompt(&updated_config.vocabulary);
+                                effective_provider = engine::effective_provider(
+                                    updated_config.provider(),
+                                    &entitlements,
+                                )
+                                .to_string();
+                                cloud_llm = if effective_provider.eq_ignore_ascii_case("local") {
+                                    None
+                                } else {
+                                    match CloudLlm::from_config(&updated_config) {
+                                        Ok(client) => Some(client),
+                                        Err(error) => {
+                                            tracing::warn!(error = %error, "Updated cloud provider could not be initialized");
+                                            None
+                                        }
                                     }
                                 };
+                                local_llm = None;
+                                local_llm_unavailable = false;
+                                config = updated_config;
+                                tracing::info!("Applied saved VeeType settings without restart");
                             }
-                            let new_model = installed_whisper_model(
-                                &app_dir,
-                                &updated_config.settings.whisper_model,
-                            );
-                            if new_model.as_ref().is_some_and(|path| path != &whisper_model_path) {
-                                whisper_model_path = new_model.expect("model path was checked");
-                                whisper_engine = None;
-                                last_model_use = None;
-                            }
-                            hands_free_enabled = engine::hands_free_enabled(
-                                updated_config.settings.hands_free,
-                                &entitlements,
-                            );
-                            silence_limit = (16_000_u64
-                                * updated_config.settings.silence_timeout_ms.clamp(1, 60_000)
-                                / 1_000) as usize;
-                            whisper_prompt = vocabulary_prompt(&updated_config.vocabulary);
-                            effective_provider = engine::effective_provider(
-                                updated_config.provider(),
-                                &entitlements,
-                            )
-                            .to_string();
-                            cloud_llm = if effective_provider.eq_ignore_ascii_case("local") {
-                                None
-                            } else {
-                                match CloudLlm::from_config(&updated_config) {
-                                    Ok(client) => Some(client),
-                                    Err(error) => {
-                                        tracing::warn!(error = %error, "Updated cloud provider could not be initialized");
-                                        None
-                                    }
-                                }
-                            };
-                            local_llm = None;
-                            local_llm_unavailable = false;
-                            config = updated_config;
-                            tracing::info!("Applied saved VeeType settings without restart");
+                            Ok(_) => show_error_dialog(
+                                "Could not apply VeeType settings",
+                                "The selected hotkey is not supported.",
+                            ),
+                            Err(error) => show_error_dialog(
+                                "Could not reload VeeType settings",
+                                &format!("{error:#}"),
+                            ),
                         }
-                        Ok(_) => show_error_dialog(
-                            "Could not apply VeeType settings",
-                            "The selected hotkey is not supported.",
-                        ),
-                        Err(error) => show_error_dialog(
-                            "Could not reload VeeType settings",
-                            &format!("{error:#}"),
-                        ),
                     }
-                }
                 }
                 WindowsActivity::OpenSettings => {
                     if let Err(error) = open_settings_window() {
-                    tracing::error!(error = %error, "Could not open Settings for the running VeeType instance");
-                    show_error_dialog("Could not open VeeType Settings", &format!("{error:#}"));
+                        tracing::error!(error = %error, "Could not open Settings for the running VeeType instance");
+                        show_error_dialog("Could not open VeeType Settings", &format!("{error:#}"));
                     }
                 }
                 WindowsActivity::Message | WindowsActivity::Timeout => {}
@@ -993,42 +1096,61 @@ fn run_app(wake_event: HANDLE, config_event: HANDLE, show_control_center: bool) 
         }
 
         overlay.show(OverlayState::Processing)?;
-        if let Err(error) =
-            ensure_whisper_engine(&mut whisper_engine, &whisper_model_path, &mut whisper_scheduler)
-        {
+        if let Err(error) = ensure_whisper_engine(
+            &mut whisper_engine,
+            &whisper_model_path,
+            &mut whisper_scheduler,
+        ) {
             tracing::error!(error = %error, "Speech engine could not be initialized");
             overlay.hide()?;
             show_error_dialog(
                 "VeeType could not start speech recognition",
-                &format!("{error:#}\n\nOpen Settings to select or download a compatible speech model."),
+                &format!(
+                    "{error:#}\n\nOpen Settings to select or download a compatible speech model."
+                ),
             );
             continue;
         }
         last_model_use = Some(Instant::now());
-        let mut actual_backend = whisper_engine.as_ref().expect("Whisper engine loaded").backend;
+        let mut actual_backend = whisper_engine
+            .as_ref()
+            .expect("Whisper engine loaded")
+            .backend;
         let mut transcription_started = Instant::now();
         let mut transcription_result = transcribe_with_engine(
             whisper_engine.as_mut().expect("Speech engine loaded"),
-            &audio_samples, &config.settings.language,
-            config.settings.translate_to_english, &whisper_prompt,
+            &audio_samples,
+            &config.settings.language,
+            config.settings.translate_to_english,
+            &whisper_prompt,
             whisper_scheduler.thread_count(),
         );
         if transcription_result.is_err() && actual_backend == ComputeBackend::Gpu {
             tracing::warn!(error = ?transcription_result.as_ref().err(), "GPU transcription failed; retrying retained audio on CPU");
             whisper_engine = None;
             whisper_scheduler.gpu_failed();
-            ensure_whisper_engine(&mut whisper_engine, &whisper_model_path, &mut whisper_scheduler)?;
+            ensure_whisper_engine(
+                &mut whisper_engine,
+                &whisper_model_path,
+                &mut whisper_scheduler,
+            )?;
             actual_backend = ComputeBackend::Cpu;
             transcription_started = Instant::now();
             transcription_result = transcribe_with_engine(
                 whisper_engine.as_mut().expect("CPU fallback loaded"),
-                &audio_samples, &config.settings.language,
-                config.settings.translate_to_english, &whisper_prompt,
+                &audio_samples,
+                &config.settings.language,
+                config.settings.translate_to_english,
+                &whisper_prompt,
                 whisper_scheduler.thread_count(),
             );
         }
         if transcription_result.is_ok() {
-            whisper_scheduler.record_performance(actual_backend, audio_samples.len() as f64 / 16_000.0, transcription_started.elapsed());
+            whisper_scheduler.record_performance(
+                actual_backend,
+                audio_samples.len() as f64 / 16_000.0,
+                transcription_started.elapsed(),
+            );
         }
         tracing::info!(
             elapsed_ms = transcription_started.elapsed().as_millis(),
@@ -1039,6 +1161,10 @@ fn run_app(wake_event: HANDLE, config_event: HANDLE, show_control_center: bool) 
             Ok(text) => text,
             Err(error) => {
                 tracing::error!(error = %error, "Speech recognition failed; VeeType will remain available");
+                // A native worker error can leave its pipe or session unusable.
+                // Drop it now so the next dictation starts a fresh worker.
+                whisper_engine = None;
+                last_model_use = None;
                 overlay.hide()?;
                 show_error_dialog(
                     "VeeType could not recognize that dictation",
@@ -1048,7 +1174,9 @@ fn run_app(wake_event: HANDLE, config_event: HANDLE, show_control_center: bool) 
             }
         };
         let trimmed_raw = raw_text.trim();
-        if !trimmed_raw.is_empty() && engine::launcher::evaluate_and_launch(trimmed_raw, &config.voice_commands) {
+        if !trimmed_raw.is_empty()
+            && engine::launcher::evaluate_and_launch(trimmed_raw, &config.voice_commands)
+        {
             tracing::info!("Voice launch command handled; skipping text insertion");
         } else if !trimmed_raw.is_empty() {
             let profile = active_exe
@@ -1292,10 +1420,8 @@ mod tests {
 
     #[test]
     fn detects_a_newly_selected_whisper_model_without_the_base_model() {
-        let app_dir = std::env::temp_dir().join(format!(
-            "veetype-model-test-{}",
-            std::process::id()
-        ));
+        let app_dir =
+            std::env::temp_dir().join(format!("veetype-model-test-{}", std::process::id()));
         let models_dir = app_dir.join("Models");
         std::fs::create_dir_all(&models_dir).unwrap();
         let selected = models_dir.join("ggml-small.en.bin");
@@ -1309,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_gguf_models_before_native_loading() {
+    fn accepts_imported_gguf_models_for_the_isolated_engine() {
         let app_dir = std::env::temp_dir().join(format!(
             "veetype-unsupported-model-test-{}",
             std::process::id()
@@ -1318,7 +1444,10 @@ mod tests {
         std::fs::create_dir_all(&models_dir).unwrap();
         std::fs::write(models_dir.join("unstable.gguf"), []).unwrap();
 
-        assert!(installed_whisper_model(&app_dir, "unstable.gguf").is_none());
+        assert_eq!(
+            installed_whisper_model(&app_dir, "unstable.gguf"),
+            Some(models_dir.join("unstable.gguf"))
+        );
 
         std::fs::remove_dir_all(app_dir).unwrap();
     }

@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use cpal::traits::{DeviceTrait, StreamTrait};
-use ringbuf::{HeapConsumer, HeapRb};
 use nnnoiseless::DenoiseState;
+use ringbuf::{HeapConsumer, HeapRb};
 use webrtc_vad::{SampleRate, Vad, VadMode};
 use whisper_rs::{FullParams, SamplingStrategy};
 
@@ -91,7 +91,10 @@ impl AudioCapture {
                             let current_idx = (sample_index as f32 / ratio) as usize;
                             let next_idx = ((sample_index + 1) as f32 / ratio) as usize;
                             if current_idx != next_idx {
-                                let mono = frame.iter().map(|sample| *sample as f32 / i16::MAX as f32).sum::<f32>()
+                                let mono = frame
+                                    .iter()
+                                    .map(|sample| *sample as f32 / i16::MAX as f32)
+                                    .sum::<f32>()
                                     / channels as f32;
                                 let _ = producer.push(mono.clamp(-1.0, 1.0));
                             }
@@ -112,7 +115,10 @@ impl AudioCapture {
                             let current_idx = (sample_index as f32 / ratio) as usize;
                             let next_idx = ((sample_index + 1) as f32 / ratio) as usize;
                             if current_idx != next_idx {
-                                let mono = frame.iter().map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0).sum::<f32>()
+                                let mono = frame
+                                    .iter()
+                                    .map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
+                                    .sum::<f32>()
                                     / channels as f32;
                                 let _ = producer.push(mono.clamp(-1.0, 1.0));
                             }

@@ -10,8 +10,12 @@ use crate::config::{load_config, save_config, AppConfig, AppProfile};
 use crate::engine::downloader::Download;
 use crate::engine::{KeyVault, OtaUpdater};
 use crate::utils::hotkey::{is_hotkey_pressed, is_valid_hotkey, pressed_hotkey};
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE};
-use windows_sys::Win32::System::Threading::{CreateMutexW, OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE,
+};
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, OpenEventW, SetEvent, EVENT_MODIFY_STATE,
+};
 
 const APP_CONFIG_EVENT: &str = "Global\\VeeTypeConfigChanged";
 const SETTINGS_WINDOW_MUTEX: &str = "Global\\VeeTypeSettingsWindow";
@@ -20,11 +24,17 @@ struct SettingsWindowGuard(HANDLE);
 
 impl SettingsWindowGuard {
     fn acquire() -> anyhow::Result<Option<Self>> {
-        let mutex_name: Vec<u16> = SETTINGS_WINDOW_MUTEX.encode_utf16().chain(Some(0)).collect();
+        let mutex_name: Vec<u16> = SETTINGS_WINDOW_MUTEX
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
         unsafe { SetLastError(0) };
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr()) };
         if handle == 0 {
-            anyhow::bail!("Could not create the Settings window mutex (Windows error {})", unsafe { GetLastError() });
+            anyhow::bail!(
+                "Could not create the Settings window mutex (Windows error {})",
+                unsafe { GetLastError() }
+            );
         }
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             unsafe { CloseHandle(handle) };
@@ -73,7 +83,9 @@ pub fn run(app_dir: PathBuf) -> anyhow::Result<()> {
             .with_inner_size([1000.0, 720.0])
             .with_min_inner_size([820.0, 560.0])
     } else {
-        viewport.with_inner_size([500.0, 700.0]).with_resizable(false)
+        viewport
+            .with_inner_size([500.0, 700.0])
+            .with_resizable(false)
     };
     let run_with = |renderer: eframe::Renderer| -> anyhow::Result<()> {
         let app_dir = app_dir.clone();
@@ -274,17 +286,14 @@ impl SettingsApp {
         })();
 
         self.status = Some(match result {
-            Ok(()) => (
-                true,
-                "Settings saved and applied to VeeType.".into(),
-            ),
+            Ok(()) => (true, "Settings saved and applied to VeeType.".into()),
             Err(error) => (false, format!("Could not save settings: {error:#}")),
         });
     }
 
     fn import_model(&mut self) {
         let Some(source) = rfd::FileDialog::new()
-            .add_filter("Whisper models", &["bin"])
+            .add_filter("Speech models", &["gguf", "bin"])
             .pick_file()
         else {
             return;
@@ -308,13 +317,18 @@ impl SettingsApp {
 
     fn render_library(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        self.downloads.retain(|_, download| {
-            !(download.is_finished() && download.error().is_none())
-        });
+        self.downloads
+            .retain(|_, download| !(download.is_finished() && download.error().is_none()));
         let installed = model_files(&self.models_dir).unwrap_or_default();
-        for (heading, recommended) in [("RECOMMENDED OFFLINE MODELS", true), ("OTHER MODELS", false)] {
+        for (heading, recommended) in [
+            ("RECOMMENDED OFFLINE MODELS", true),
+            ("OTHER MODELS", false),
+        ] {
             ui.label(egui::RichText::new(heading).small().color(INK).strong());
-            for model in MODEL_CATALOG.iter().filter(|m| m.recommended == recommended) {
+            for model in MODEL_CATALOG
+                .iter()
+                .filter(|m| m.recommended == recommended)
+            {
                 let is_installed = installed.iter().any(|f| f == model.file);
                 let download = self.downloads.get(model.file).cloned();
                 if model_card(ui, model, is_installed, download.as_deref()) {
@@ -333,10 +347,7 @@ impl SettingsApp {
 
             match model_files(&self.models_dir) {
                 Ok(files) if files.is_empty() => {
-                    ui.colored_label(
-                        WARN,
-                        "No model files found.",
-                    );
+                    ui.colored_label(WARN, "No model files found.");
                 }
                 Ok(files) => {
                     for file in files {
@@ -344,14 +355,11 @@ impl SettingsApp {
                     }
                 }
                 Err(error) => {
-                    ui.colored_label(
-                        ERR,
-                        format!("Could not list model files: {error:#}"),
-                    );
+                    ui.colored_label(ERR, format!("Could not list model files: {error:#}"));
                 }
             }
 
-            if ui.button("Import Whisper model...").clicked() {
+            if ui.button("Import speech model...").clicked() {
                 self.import_model();
             }
         });
@@ -370,18 +378,23 @@ impl SettingsApp {
         }
         let commands = &mut self.config.voice_commands;
         let mut triggers = commands.triggers.join(", ");
-        row_card(ui, "Trigger words", "The first word you say must be one of these.", |ui| {
-            if ui
-                .add(egui::TextEdit::singleline(&mut triggers).desired_width(260.0))
-                .changed()
-            {
-                commands.triggers = triggers
-                    .split(',')
-                    .map(|word| word.trim().to_lowercase())
-                    .filter(|word| !word.is_empty() && !word.contains(char::is_whitespace))
-                    .collect();
-            }
-        });
+        row_card(
+            ui,
+            "Trigger words",
+            "The first word you say must be one of these.",
+            |ui| {
+                if ui
+                    .add(egui::TextEdit::singleline(&mut triggers).desired_width(260.0))
+                    .changed()
+                {
+                    commands.triggers = triggers
+                        .split(',')
+                        .map(|word| word.trim().to_lowercase())
+                        .filter(|word| !word.is_empty() && !word.contains(char::is_whitespace))
+                        .collect();
+                }
+            },
+        );
         section(ui, "Shortcuts", |ui| {
             ui.label(
                 egui::RichText::new(
@@ -428,8 +441,9 @@ impl SettingsApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let ready =
                         !self.alias_name.trim().is_empty() && !self.alias_path.trim().is_empty();
-                    let add = egui::Button::new(egui::RichText::new("Add shortcut").color(ON_ACCENT))
-                        .fill(ACCENT);
+                    let add =
+                        egui::Button::new(egui::RichText::new("Add shortcut").color(ON_ACCENT))
+                            .fill(ACCENT);
                     if ui.add_enabled(ready, add).clicked() {
                         commands.aliases.insert(
                             self.alias_name.trim().to_lowercase(),
@@ -445,8 +459,10 @@ impl SettingsApp {
     fn render_app_profiles(&mut self, ui: &mut egui::Ui) {
         section(ui, "Activate for apps", |ui| {
             ui.label(
-                egui::RichText::new("Override the writing mode per application (matched by executable name).")
-                    .color(MUTED),
+                egui::RichText::new(
+                    "Override the writing mode per application (matched by executable name).",
+                )
+                .color(MUTED),
             );
             let mut remove = None;
             for (exe, profile) in self.config.app_profiles.iter_mut() {
@@ -463,7 +479,11 @@ impl SettingsApp {
                             .width(120.0)
                             .show_ui(ui, |ui| {
                                 for mode in ["default", "coding", "professional"] {
-                                    ui.selectable_value(&mut profile.mode, Some(mode.to_string()), mode);
+                                    ui.selectable_value(
+                                        &mut profile.mode,
+                                        Some(mode.to_string()),
+                                        mode,
+                                    );
                                 }
                             });
                     });
@@ -541,7 +561,10 @@ impl SettingsApp {
                                 .hint_text("Enter a new key to replace the stored key"),
                         );
                     });
-                    ui.checkbox(&mut self.remove_anthropic_key, "Remove stored Anthropic key");
+                    ui.checkbox(
+                        &mut self.remove_anthropic_key,
+                        "Remove stored Anthropic key",
+                    );
                 });
         });
     }
@@ -552,13 +575,10 @@ impl SettingsApp {
         self.resize_pending = true;
         self.tab = Tab::Home;
         self.status = Some(match save_config(&self.app_dir, &self.config) {
-            Ok(()) => (
-                true,
-                {
-                    signal_running_app();
-                    "Setup complete. Settings are applied automatically.".into()
-                },
-            ),
+            Ok(()) => (true, {
+                signal_running_app();
+                "Setup complete. Settings are applied automatically.".into()
+            }),
             Err(error) => (false, format!("Could not save settings: {error:#}")),
         });
     }
@@ -579,11 +599,23 @@ impl SettingsApp {
         ui.add_space(18.0);
         let (title, subtitle) = match step {
             0 => ("Welcome to VeeType", "Your voice. Beautifully written."),
-            1 => ("Microphone access", "VeeType needs your microphone to hear you."),
-            2 => ("Choose your engine", "Pick an offline model. It downloads once and runs on this PC."),
-            3 => ("Everything you get", "Powerful tools for a refined workflow."),
+            1 => (
+                "Microphone access",
+                "VeeType needs your microphone to hear you.",
+            ),
+            2 => (
+                "Choose your engine",
+                "Pick an offline model. It downloads once and runs on this PC.",
+            ),
+            3 => (
+                "Everything you get",
+                "Powerful tools for a refined workflow.",
+            ),
             4 => ("Set your hotkey", "Hold it anywhere in Windows to dictate."),
-            _ => ("Test your setup", "Check your microphone, then try dictating below."),
+            _ => (
+                "Test your setup",
+                "Check your microphone, then try dictating below.",
+            ),
         };
         ui.label(egui::RichText::new(title).size(28.0).strong().color(INK));
         ui.add_space(2.0);
@@ -840,14 +872,12 @@ impl SettingsApp {
             ui.vertical_centered(|ui| skip = link_button(ui, "Maybe later"));
         } else {
             ui.columns(2, |columns| {
-                columns[0].with_layout(
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui| back = link_button(ui, "Back"),
-                );
-                columns[1].with_layout(
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| skip = link_button(ui, "Skip setup"),
-                );
+                columns[0].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    back = link_button(ui, "Back")
+                });
+                columns[1].with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    skip = link_button(ui, "Skip setup")
+                });
             });
         }
 
@@ -901,7 +931,9 @@ impl eframe::App for SettingsApp {
         if self.resize_pending {
             self.resize_pending = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(820.0, 560.0)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+                820.0, 560.0,
+            )));
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1000.0, 720.0)));
         }
         self.capture_hotkey_if_pressed();
@@ -917,64 +949,69 @@ impl eframe::App for SettingsApp {
         }
 
         if !self.onboarding {
-        egui::SidePanel::left("nav_sidebar")
-            .exact_width(220.0)
-            .resizable(false)
-            .frame(
-                egui::Frame::none()
-                    .fill(SIDEBAR)
-                    .stroke(egui::Stroke::new(1.0_f32, LINE))
-                    .inner_margin(egui::Margin::symmetric(16.0, 16.0)),
-            )
-            .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.0);
-                    ui.image((self.logo.id(), egui::vec2(32.0, 32.0)));
-                    ui.heading(egui::RichText::new("VeeType").color(INK).strong());
-                });
-                ui.add_space(24.0);
-                for (group, tabs) in [
-                    (
-                        0,
-                        &[Tab::Home, Tab::Modes, Tab::Vocabulary, Tab::Shortcuts][..],
-                    ),
-                    (1, &[Tab::Config, Tab::Sound, Tab::Library][..]),
-                ] {
-                    if group > 0 {
-                        ui.add_space(14.0);
-                    }
-                    for &tab in tabs {
-                        if sidebar_item(ui, tab, self.tab == tab).clicked() {
-                            self.tab = tab;
+            egui::SidePanel::left("nav_sidebar")
+                .exact_width(220.0)
+                .resizable(false)
+                .frame(
+                    egui::Frame::none()
+                        .fill(SIDEBAR)
+                        .stroke(egui::Stroke::new(1.0_f32, LINE))
+                        .inner_margin(egui::Margin::symmetric(16.0, 16.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        ui.image((self.logo.id(), egui::vec2(32.0, 32.0)));
+                        ui.heading(egui::RichText::new("VeeType").color(INK).strong());
+                    });
+                    ui.add_space(24.0);
+                    for (group, tabs) in [
+                        (
+                            0,
+                            &[Tab::Home, Tab::Modes, Tab::Vocabulary, Tab::Shortcuts][..],
+                        ),
+                        (1, &[Tab::Config, Tab::Sound, Tab::Library][..]),
+                    ] {
+                        if group > 0 {
+                            ui.add_space(14.0);
+                        }
+                        for &tab in tabs {
+                            if sidebar_item(ui, tab, self.tab == tab).clicked() {
+                                self.tab = tab;
+                            }
                         }
                     }
-                }
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    let (plan, color) = ("FULL EDITION", ACCENT);
-                    ui.add_space(8.0);
-                    egui::Frame::none()
-                        .fill(CARD)
-                        .stroke(egui::Stroke::new(1.0_f32, color))
-                        .rounding(egui::Rounding::same(8.0))
-                        .inner_margin(egui::Margin::same(10.0))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                ui.label("VeeType");
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| ui.colored_label(color, egui::RichText::new(plan).strong()),
-                                );
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                        let (plan, color) = ("FULL EDITION", ACCENT);
+                        ui.add_space(8.0);
+                        egui::Frame::none()
+                            .fill(CARD)
+                            .stroke(egui::Stroke::new(1.0_f32, color))
+                            .rounding(egui::Rounding::same(8.0))
+                            .inner_margin(egui::Margin::same(10.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label("VeeType");
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.colored_label(
+                                                color,
+                                                egui::RichText::new(plan).strong(),
+                                            )
+                                        },
+                                    );
+                                });
                             });
-                        });
-                    ui.label(
-                        egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                            .small()
-                            .color(MUTED),
-                    );
+                        ui.label(
+                            egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .small()
+                                .color(MUTED),
+                        );
+                    });
                 });
-            });
         }
 
         if !self.onboarding {
@@ -988,7 +1025,9 @@ impl eframe::App for SettingsApp {
                 .show(ctx, |ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let save = egui::Button::new(
-                            egui::RichText::new("Save settings").color(ON_ACCENT).strong(),
+                            egui::RichText::new("Save settings")
+                                .color(ON_ACCENT)
+                                .strong(),
                         )
                         .fill(ACCENT)
                         .rounding(egui::Rounding::same(18.0))
@@ -1274,8 +1313,8 @@ fn copy_model(source: &Path, models_dir: &Path) -> anyhow::Result<PathBuf> {
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default();
-    if !extension.eq_ignore_ascii_case("bin") {
-        anyhow::bail!("Only Whisper .bin model files can be imported");
+    if !extension.eq_ignore_ascii_case("gguf") && !extension.eq_ignore_ascii_case("bin") {
+        anyhow::bail!("Only .gguf and .bin speech model files can be imported");
     }
     let file_name = source
         .file_name()
@@ -1320,6 +1359,16 @@ struct CatalogModel {
 }
 
 static MODEL_CATALOG: &[CatalogModel] = &[
+    CatalogModel {
+        name: "Parakeet Unified EN 0.6B",
+        description: "Fast, accurate English dictation in a crash-isolated engine.",
+        file: "parakeet-unified-en-0.6b-Q8_0.gguf",
+        size: "731 MB",
+        languages: "English",
+        speed: 0.95,
+        accuracy: 0.94,
+        recommended: true,
+    },
     CatalogModel {
         name: "Whisper Large v3 Turbo",
         description: "Best offline accuracy, optimized for speed.",
@@ -1380,10 +1429,10 @@ static MODEL_CATALOG: &[CatalogModel] = &[
         accuracy: 0.99,
         recommended: false,
     },
-
     CatalogModel {
         name: "Whisper Large v3 Turbo (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-large-v3-turbo-q5_0.bin",
         size: "547 MB",
         languages: "Multilingual",
@@ -1393,7 +1442,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Large v3 Turbo (Q8)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-large-v3-turbo-q8_0.bin",
         size: "834 MB",
         languages: "Multilingual",
@@ -1403,7 +1453,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Large v3 (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-large-v3-q5_0.bin",
         size: "1.0 GB",
         languages: "Multilingual",
@@ -1423,7 +1474,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Large v2 (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-large-v2-q5_0.bin",
         size: "1.0 GB",
         languages: "Multilingual",
@@ -1433,7 +1485,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Large v2 (Q8)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-large-v2-q8_0.bin",
         size: "1.5 GB",
         languages: "Multilingual",
@@ -1453,7 +1506,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Medium (English) (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-medium.en-q5_0.bin",
         size: "514 MB",
         languages: "English",
@@ -1463,7 +1517,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Medium (English) (Q8)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-medium.en-q8_0.bin",
         size: "785 MB",
         languages: "English",
@@ -1483,7 +1538,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Medium (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-medium-q5_0.bin",
         size: "514 MB",
         languages: "Multilingual",
@@ -1493,7 +1549,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Medium (Q8)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-medium-q8_0.bin",
         size: "785 MB",
         languages: "Multilingual",
@@ -1503,7 +1560,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Small (English) (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-small.en-q5_1.bin",
         size: "181 MB",
         languages: "English",
@@ -1513,7 +1571,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Small (English) (Q8)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-small.en-q8_0.bin",
         size: "252 MB",
         languages: "English",
@@ -1533,7 +1592,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Small (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-small-q5_1.bin",
         size: "181 MB",
         languages: "Multilingual",
@@ -1543,7 +1603,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Small (Q8)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-small-q8_0.bin",
         size: "252 MB",
         languages: "Multilingual",
@@ -1553,7 +1614,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Base (English) (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-base.en-q5_1.bin",
         size: "57 MB",
         languages: "English",
@@ -1563,7 +1625,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Base (English) (Q8)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-base.en-q8_0.bin",
         size: "78 MB",
         languages: "English",
@@ -1583,7 +1646,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Base (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-base-q5_1.bin",
         size: "57 MB",
         languages: "Multilingual",
@@ -1593,7 +1657,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Base (Q8)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-base-q8_0.bin",
         size: "78 MB",
         languages: "Multilingual",
@@ -1603,7 +1668,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Tiny (English) (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-tiny.en-q5_1.bin",
         size: "31 MB",
         languages: "English",
@@ -1613,7 +1679,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Tiny (English) (Q8)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-tiny.en-q8_0.bin",
         size: "42 MB",
         languages: "English",
@@ -1633,7 +1700,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Tiny (Q5)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-tiny-q5_1.bin",
         size: "31 MB",
         languages: "Multilingual",
@@ -1643,7 +1711,8 @@ static MODEL_CATALOG: &[CatalogModel] = &[
     },
     CatalogModel {
         name: "Whisper Tiny (Q8)",
-        description: "Compressed build: smaller download and faster, with a small accuracy trade-off.",
+        description:
+            "Compressed build: smaller download and faster, with a small accuracy trade-off.",
         file: "ggml-tiny-q8_0.bin",
         size: "42 MB",
         languages: "Multilingual",
@@ -1706,10 +1775,7 @@ fn model_card(
                                 .text(format!("{:.0}%", download.progress() * 100.0)),
                         );
                     } else {
-                        if ui
-                            .button(format!("Download ({})", model.size))
-                            .clicked()
-                        {
+                        if ui.button(format!("Download ({})", model.size)).clicked() {
                             start = true;
                         }
                         if let Some(error) = download.and_then(Download::error) {
@@ -1750,19 +1816,33 @@ fn test_microphone(device_name: Option<&str>) -> (bool, String, f32) {
         let stream = match supported.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &stream_config,
-                move |data: &[f32], _: &_| record_peak(&peak_writer, data.iter().map(|sample| sample.abs())),
+                move |data: &[f32], _: &_| {
+                    record_peak(&peak_writer, data.iter().map(|sample| sample.abs()))
+                },
                 |error| tracing::warn!(%error, "Microphone test stream error"),
                 None,
             )?,
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &stream_config,
-                move |data: &[i16], _: &_| record_peak(&peak_writer, data.iter().map(|sample| (*sample as f32 / i16::MAX as f32).abs())),
+                move |data: &[i16], _: &_| {
+                    record_peak(
+                        &peak_writer,
+                        data.iter()
+                            .map(|sample| (*sample as f32 / i16::MAX as f32).abs()),
+                    )
+                },
                 |error| tracing::warn!(%error, "Microphone test stream error"),
                 None,
             )?,
             cpal::SampleFormat::U16 => device.build_input_stream(
                 &stream_config,
-                move |data: &[u16], _: &_| record_peak(&peak_writer, data.iter().map(|sample| ((*sample as f32 / u16::MAX as f32) * 2.0 - 1.0).abs())),
+                move |data: &[u16], _: &_| {
+                    record_peak(
+                        &peak_writer,
+                        data.iter()
+                            .map(|sample| ((*sample as f32 / u16::MAX as f32) * 2.0 - 1.0).abs()),
+                    )
+                },
                 |error| tracing::warn!(%error, "Microphone test stream error"),
                 None,
             )?,
@@ -1784,7 +1864,10 @@ fn test_microphone(device_name: Option<&str>) -> (bool, String, f32) {
     }
 }
 
-fn record_peak(samples_peak: &std::sync::Arc<std::sync::atomic::AtomicU32>, samples: impl Iterator<Item = f32>) {
+fn record_peak(
+    samples_peak: &std::sync::Arc<std::sync::atomic::AtomicU32>,
+    samples: impl Iterator<Item = f32>,
+) {
     let level = samples.fold(0.0_f32, f32::max);
     if level > f32::from_bits(samples_peak.load(std::sync::atomic::Ordering::Relaxed)) {
         samples_peak.store(level.to_bits(), std::sync::atomic::Ordering::Relaxed);
@@ -1817,9 +1900,17 @@ fn advanced_header(ui: &mut egui::Ui, open: bool) -> bool {
     let c = egui::pos2(rect.left() + 28.0, rect.center().y);
     let stroke = egui::Stroke::new(1.8_f32, MUTED);
     let points = if open {
-        [c + egui::vec2(-4.0, -2.0), c + egui::vec2(0.0, 2.5), c + egui::vec2(4.0, -2.0)]
+        [
+            c + egui::vec2(-4.0, -2.0),
+            c + egui::vec2(0.0, 2.5),
+            c + egui::vec2(4.0, -2.0),
+        ]
     } else {
-        [c + egui::vec2(-2.0, -4.0), c + egui::vec2(2.5, 0.0), c + egui::vec2(-2.0, 4.0)]
+        [
+            c + egui::vec2(-2.0, -4.0),
+            c + egui::vec2(2.5, 0.0),
+            c + egui::vec2(-2.0, 4.0),
+        ]
     };
     painter.line_segment([points[0], points[1]], stroke);
     painter.line_segment([points[1], points[2]], stroke);
@@ -1830,16 +1921,26 @@ fn advanced_header(ui: &mut egui::Ui, open: bool) -> bool {
         egui::FontId::proportional(15.0),
         INK,
     );
-    response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }
 
 fn page_header(ui: &mut egui::Ui, tab: Tab) {
     ui.vertical_centered(|ui| {
-        ui.label(egui::RichText::new(tab.title()).size(17.0).strong().color(INK));
+        ui.label(
+            egui::RichText::new(tab.title())
+                .size(17.0)
+                .strong()
+                .color(INK),
+        );
     });
     ui.add_space(6.0);
-    let line = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover()).0;
-    ui.painter().rect_filled(line, 0.0, LINE.gamma_multiply(0.6));
+    let line = ui
+        .allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover())
+        .0;
+    ui.painter()
+        .rect_filled(line, 0.0, LINE.gamma_multiply(0.6));
     ui.add_space(16.0);
 }
 
@@ -1890,10 +1991,8 @@ fn toggle_row(ui: &mut egui::Ui, label: &str, hint: &str, on: &mut bool, enabled
 }
 
 fn sidebar_item(ui: &mut egui::Ui, tab: Tab, active: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 36.0),
-        egui::Sense::click(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::click());
     let painter = ui.painter();
     if active {
         painter.rect_filled(rect, 10.0, PANEL);
@@ -1953,69 +2052,80 @@ impl SettingsApp {
             .find(|m| m.file == selected)
             .map_or(selected.clone(), |m| m.name.to_string());
         let mut choose: Option<&'static str> = None;
-        row_card(ui, "Voice Model", "Local Whisper model used for dictation.", |ui| {
-            egui::ComboBox::from_id_salt("voice_model")
-                .selected_text(selected_name)
-                .width(300.0)
-                .show_ui(ui, |ui| {
-                    ui.set_width(284.0);
-                    ui.spacing_mut().item_spacing.y = 6.0;
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.model_search)
-                            .hint_text("Search models")
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("POPULAR").small().color(MUTED));
-                    egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    let query = self.model_search.to_lowercase();
-                    for model in MODEL_CATALOG
-                        .iter()
-                        .filter(|m| query.is_empty() || m.name.to_lowercase().contains(&query))
-                    {
-                        let is_installed = installed.iter().any(|f| f == model.file);
-                        let busy = self
-                            .downloads
-                            .get(model.file)
-                            .is_some_and(|d| !d.is_finished());
-                        let row = ui
-                            .horizontal(|ui| {
-                                let response = ui.selectable_label(
-                                    selected == model.file,
-                                    egui::RichText::new(model.name),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if is_installed {
-                                            ui.colored_label(OK, "Installed");
-                                        } else if busy {
-                                            ui.colored_label(MUTED, "Downloading...");
-                                        } else {
-                                            ui.colored_label(MUTED, model.size.to_string());
-                                        }
-                                    },
-                                );
-                                response
-                            })
-                            .inner;
-                        let row = row.on_hover_ui(|ui| {
-                            ui.set_max_width(320.0);
-                            ui.label(egui::RichText::new(model.name).strong());
-                            ui.label(egui::RichText::new(model.description).color(MUTED));
-                            ui.add_space(4.0);
-                            metric_bar(ui, "Speed", model.speed);
-                            metric_bar(ui, "Accuracy", model.accuracy);
-                            ui.label(format!("Size  {}", model.size));
-                        });
-                        if row.clicked() {
-                            choose = Some(model.file);
-                        }
-                    }
+        row_card(
+            ui,
+            "Voice Model",
+            "Local speech model used for dictation.",
+            |ui| {
+                egui::ComboBox::from_id_salt("voice_model")
+                    .selected_text(selected_name)
+                    .width(300.0)
+                    .show_ui(ui, |ui| {
+                        ui.set_width(284.0);
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.model_search)
+                                .hint_text("Search models")
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("POPULAR").small().color(MUTED));
+                        egui::ScrollArea::vertical()
+                            .max_height(260.0)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                let query = self.model_search.to_lowercase();
+                                for model in MODEL_CATALOG.iter().filter(|m| {
+                                    query.is_empty() || m.name.to_lowercase().contains(&query)
+                                }) {
+                                    let is_installed = installed.iter().any(|f| f == model.file);
+                                    let busy = self
+                                        .downloads
+                                        .get(model.file)
+                                        .is_some_and(|d| !d.is_finished());
+                                    let row = ui
+                                        .horizontal(|ui| {
+                                            let response = ui.selectable_label(
+                                                selected == model.file,
+                                                egui::RichText::new(model.name),
+                                            );
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if is_installed {
+                                                        ui.colored_label(OK, "Installed");
+                                                    } else if busy {
+                                                        ui.colored_label(MUTED, "Downloading...");
+                                                    } else {
+                                                        ui.colored_label(
+                                                            MUTED,
+                                                            model.size.to_string(),
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                            response
+                                        })
+                                        .inner;
+                                    let row = row.on_hover_ui(|ui| {
+                                        ui.set_max_width(320.0);
+                                        ui.label(egui::RichText::new(model.name).strong());
+                                        ui.label(
+                                            egui::RichText::new(model.description).color(MUTED),
+                                        );
+                                        ui.add_space(4.0);
+                                        metric_bar(ui, "Speed", model.speed);
+                                        metric_bar(ui, "Accuracy", model.accuracy);
+                                        ui.label(format!("Size  {}", model.size));
+                                    });
+                                    if row.clicked() {
+                                        choose = Some(model.file);
+                                    }
+                                }
+                            });
                     });
-                });
-        });
+            },
+        );
         if let Some(file) = choose {
             self.config.settings.whisper_model = file.to_string();
             let present = model_files(&self.models_dir)
@@ -2044,7 +2154,11 @@ impl SettingsApp {
 
         row_card(ui, "Keyboard shortcut", "Global push-to-talk key.", |ui| {
             if ui
-                .button(if self.capture_hotkey { "Press a key..." } else { "Record shortcut" })
+                .button(if self.capture_hotkey {
+                    "Press a key..."
+                } else {
+                    "Record shortcut"
+                })
                 .clicked()
             {
                 self.capture_hotkey = true;
@@ -2137,9 +2251,11 @@ impl SettingsApp {
                 }
             });
             ui.label(
-                egui::RichText::new("Only ASCII phrases can be matched. Click Save settings to apply.")
-                    .small()
-                    .color(MUTED),
+                egui::RichText::new(
+                    "Only ASCII phrases can be matched. Click Save settings to apply.",
+                )
+                .small()
+                .color(MUTED),
             );
         });
     }
@@ -2246,7 +2362,13 @@ fn draw_icon(
             painter.circle_filled(center, 0.16 * s, color);
         }
         Icon::Waves => {
-            for (x, h) in [(-0.8_f32, 0.4_f32), (-0.4, 0.85), (0.0, 1.0), (0.4, 0.7), (0.8, 0.45)] {
+            for (x, h) in [
+                (-0.8_f32, 0.4_f32),
+                (-0.4, 0.85),
+                (0.0, 1.0),
+                (0.4, 0.7),
+                (0.8, 0.45),
+            ] {
                 painter.rect_filled(rect((x - 0.11, -h), (x + 0.11, h)), 0.11 * s, color);
             }
         }
@@ -2256,8 +2378,14 @@ fn draw_icon(
                 color,
                 none,
             ));
-            painter.add(Shape::line(vec![u(-1.0, -0.05), u(0.0, 0.4), u(1.0, -0.05)], thick));
-            painter.add(Shape::line(vec![u(-1.0, 0.42), u(0.0, 0.87), u(1.0, 0.42)], thick));
+            painter.add(Shape::line(
+                vec![u(-1.0, -0.05), u(0.0, 0.4), u(1.0, -0.05)],
+                thick,
+            ));
+            painter.add(Shape::line(
+                vec![u(-1.0, 0.42), u(0.0, 0.87), u(1.0, 0.42)],
+                thick,
+            ));
         }
         Icon::Mic => {
             painter.rect_filled(rect((-0.3, -0.95), (0.3, 0.15)), 0.3 * s, color);
@@ -2318,7 +2446,14 @@ fn draw_icon(
         }
         Icon::Shield => {
             painter.add(Shape::convex_polygon(
-                vec![u(-0.8, -0.65), u(0.0, -0.95), u(0.8, -0.65), u(0.7, 0.15), u(0.0, 0.95), u(-0.7, 0.15)],
+                vec![
+                    u(-0.8, -0.65),
+                    u(0.0, -0.95),
+                    u(0.8, -0.65),
+                    u(0.7, 0.15),
+                    u(0.0, 0.95),
+                    u(-0.7, 0.15),
+                ],
                 color,
                 none,
             ));
@@ -2350,8 +2485,16 @@ const FEATURES: [Feature; 11] = [
 ];
 
 fn wizard_steps_labels(ui: &mut egui::Ui, current: u8) {
-    const NAMES: [&str; 6] = ["Welcome", "Permissions", "Engine", "Features", "Hotkey", "Test"];
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
+    const NAMES: [&str; 6] = [
+        "Welcome",
+        "Permissions",
+        "Engine",
+        "Features",
+        "Hotkey",
+        "Test",
+    ];
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 18.0), egui::Sense::hover());
     let slot = rect.width() / NAMES.len() as f32;
     for (i, name) in NAMES.iter().enumerate() {
         let color = if i as u8 == current {
@@ -2372,10 +2515,8 @@ fn wizard_steps_labels(ui: &mut egui::Ui, current: u8) {
 }
 
 fn wizard_progress(ui: &mut egui::Ui, fraction: f32) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 6.0),
-        egui::Sense::hover(),
-    );
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::hover());
     let value = ui
         .ctx()
         .animate_value_with_time(egui::Id::new("wizard_progress"), fraction, 0.4);
@@ -2388,10 +2529,24 @@ fn wizard_progress(ui: &mut egui::Ui, fraction: f32) {
 }
 
 fn pill(ui: &mut egui::Ui, text: &str, primary: bool, enabled: bool) -> bool {
-    let (fill, color) = if primary { (ACCENT, ON_ACCENT) } else { (PANEL, INK) };
-    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (fill, color) = if primary {
+        (ACCENT, ON_ACCENT)
+    } else {
+        (PANEL, INK)
+    };
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
     let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 46.0), sense);
-    let alpha = if !enabled { 0.45 } else if response.hovered() { 0.9 } else { 1.0 };
+    let alpha = if !enabled {
+        0.45
+    } else if response.hovered() {
+        0.9
+    } else {
+        1.0
+    };
     let painter = ui.painter();
     painter.rect_filled(rect, 23.0, fill.gamma_multiply(alpha));
     painter.text(
@@ -2399,10 +2554,16 @@ fn pill(ui: &mut egui::Ui, text: &str, primary: bool, enabled: bool) -> bool {
         egui::Align2::CENTER_CENTER,
         text,
         egui::FontId::proportional(15.0),
-        if enabled { color } else { color.gamma_multiply(0.6) },
+        if enabled {
+            color
+        } else {
+            color.gamma_multiply(0.6)
+        },
     );
     if enabled {
-        response.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
+        response
+            .clone()
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
     }
     response.clicked()
 }
@@ -2421,7 +2582,8 @@ fn info_row(ui: &mut egui::Ui, icon: Icon, text: &str) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
                 draw_icon(ui.painter(), rect.center(), 24.0, icon, ACCENT, CARD);
                 ui.label(egui::RichText::new(text).size(14.0).color(INK));
             });
@@ -2443,10 +2605,11 @@ fn feature_carousel(ui: &mut egui::Ui, index: &mut usize, last_change: &mut f64)
         *index += 1;
         *last_change = now;
     }
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
-    let position = ui
-        .ctx()
-        .animate_value_with_time(egui::Id::new("feature_pos"), *index as f32, 0.5);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(60));
+    let position =
+        ui.ctx()
+            .animate_value_with_time(egui::Id::new("feature_pos"), *index as f32, 0.5);
     let painter = ui.painter().with_clip_rect(clip);
     let dim = egui::Color32::from_rgb(92, 86, 108);
     for (i, feature) in FEATURES.iter().enumerate() {
@@ -2456,10 +2619,8 @@ fn feature_carousel(ui: &mut egui::Ui, index: &mut usize, last_change: &mut f64)
             continue;
         }
         let focus = (1.0 - delta.abs()).clamp(0.0, 1.0);
-        let card = egui::Rect::from_center_size(
-            egui::pos2(cx, rect.center().y),
-            egui::vec2(120.0, 150.0),
-        );
+        let card =
+            egui::Rect::from_center_size(egui::pos2(cx, rect.center().y), egui::vec2(120.0, 150.0));
         let fill = CARD.lerp_to_gamma(PANEL, focus);
         painter.rect_filled(card, 22.0, fill);
         draw_icon(
@@ -2478,7 +2639,11 @@ fn feature_carousel(ui: &mut egui::Ui, index: &mut usize, last_change: &mut f64)
             MUTED.lerp_to_gamma(INK, focus),
         );
         let response = ui
-            .interact(card.intersect(clip), egui::Id::new(("feature_card", i)), egui::Sense::click())
+            .interact(
+                card.intersect(clip),
+                egui::Id::new(("feature_card", i)),
+                egui::Sense::click(),
+            )
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         if response.clicked() {
             *index = i;
@@ -2489,22 +2654,29 @@ fn feature_carousel(ui: &mut egui::Ui, index: &mut usize, last_change: &mut f64)
     ui.add_space(14.0);
     let current = &FEATURES[(*index).min(FEATURES.len() - 1)];
     ui.vertical_centered(|ui| {
-        ui.label(egui::RichText::new(current.label).size(18.0).strong().color(INK));
+        ui.label(
+            egui::RichText::new(current.label)
+                .size(18.0)
+                .strong()
+                .color(INK),
+        );
         ui.add_space(2.0);
         ui.label(egui::RichText::new(current.text).size(13.0).color(MUTED));
     });
     ui.add_space(10.0);
 
-    let (dots, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 14.0),
-        egui::Sense::hover(),
-    );
+    let (dots, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 14.0), egui::Sense::hover());
     let count = FEATURES.len();
     let left = dots.center().x - (count as f32 - 1.0) * 8.0;
     for i in 0..count {
         let center = egui::pos2(left + i as f32 * 16.0, dots.center().y);
         let active = i == *index;
-        ui.painter().circle_filled(center, if active { 4.0 } else { 3.0 }, if active { ACCENT } else { LINE });
+        ui.painter().circle_filled(
+            center,
+            if active { 4.0 } else { 3.0 },
+            if active { ACCENT } else { LINE },
+        );
         let response = ui.interact(
             egui::Rect::from_center_size(center, egui::vec2(16.0, 16.0)),
             egui::Id::new(("feature_dot", i)),
@@ -2526,7 +2698,8 @@ mod catalog_tests {
         let mut seen = std::collections::HashSet::new();
         for model in MODEL_CATALOG {
             assert!(
-                model.file.starts_with("ggml-") && model.file.ends_with(".bin")
+                (model.file.starts_with("ggml-") && model.file.ends_with(".bin"))
+                    || model.file.ends_with(".gguf")
             );
             assert!(seen.insert(model.file), "duplicate {}", model.file);
         }

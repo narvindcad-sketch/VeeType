@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::engine::adaptive::{AdaptiveBackend, ComputeBackend};
 use anyhow::Context;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -9,7 +10,6 @@ use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::{params::LlamaModelParams, AddBos};
 use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 use sysinfo::System;
-use crate::engine::adaptive::{AdaptiveBackend, ComputeBackend};
 
 pub fn apply_voice_commands(raw_text: &str) -> String {
     let commands = [
@@ -105,9 +105,13 @@ impl CachedLlm {
         let backend = LlamaBackend::init()?;
         let mut adaptive = AdaptiveBackend::new();
         let requested = adaptive.select(std::fs::metadata(&model_path)?.len(), false);
-        let (model, compute_backend) = load_model_with_backend_fallback(&backend, &model_path, requested)?;
-        if requested == ComputeBackend::Gpu && compute_backend == ComputeBackend::Cpu { adaptive.gpu_failed(); }
-        else { adaptive.activate(compute_backend); }
+        let (model, compute_backend) =
+            load_model_with_backend_fallback(&backend, &model_path, requested)?;
+        if requested == ComputeBackend::Gpu && compute_backend == ComputeBackend::Cpu {
+            adaptive.gpu_failed();
+        } else {
+            adaptive.activate(compute_backend);
+        }
 
         Ok(Self {
             model: Some(model),
@@ -128,8 +132,13 @@ impl CachedLlm {
     fn downgrade_if_needed(&mut self, model_path: PathBuf, tier: u8) -> anyhow::Result<()> {
         let (model_path, tier) = if tier > self.tier && model_path != self.model_path {
             (model_path, tier)
-        } else { (self.model_path.clone(), self.tier) };
-        let target = self.adaptive.select(std::fs::metadata(&model_path)?.len(), self.model.is_some() && self.compute_backend == ComputeBackend::Gpu);
+        } else {
+            (self.model_path.clone(), self.tier)
+        };
+        let target = self.adaptive.select(
+            std::fs::metadata(&model_path)?.len(),
+            self.model.is_some() && self.compute_backend == ComputeBackend::Gpu,
+        );
         if tier == self.tier && target == self.compute_backend && self.model.is_some() {
             return Ok(());
         }
@@ -143,8 +152,11 @@ impl CachedLlm {
 
         self.model = None;
         let (model, actual) = load_model_with_backend_fallback(&self.backend, &model_path, target)?;
-        if target == ComputeBackend::Gpu && actual == ComputeBackend::Cpu { self.adaptive.gpu_failed(); }
-        else { self.adaptive.activate(actual); }
+        if target == ComputeBackend::Gpu && actual == ComputeBackend::Cpu {
+            self.adaptive.gpu_failed();
+        } else {
+            self.adaptive.activate(actual);
+        }
         self.model = Some(model);
         self.model_path = model_path;
         self.tier = tier;
@@ -158,7 +170,11 @@ fn load_model_with_backend_fallback(
     model_path: &Path,
     requested: ComputeBackend,
 ) -> anyhow::Result<(LlamaModel, ComputeBackend)> {
-    let gpu_layers = if requested == ComputeBackend::Gpu { 99 } else { 0 };
+    let gpu_layers = if requested == ComputeBackend::Gpu {
+        99
+    } else {
+        0
+    };
     let gpu_params = LlamaModelParams::default().with_n_gpu_layers(gpu_layers);
     match LlamaModel::load_from_file(backend, model_path, &gpu_params) {
         Ok(model) => Ok((model, requested)),

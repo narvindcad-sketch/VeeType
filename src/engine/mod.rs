@@ -9,6 +9,7 @@ pub mod keychain;
 pub mod launcher;
 pub mod license;
 pub mod llm;
+pub mod parakeet;
 pub mod startup;
 pub mod text_cleanup;
 pub mod updater;

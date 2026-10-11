@@ -56,10 +56,21 @@ fn parse_command(transcription: &str, triggers: &[String]) -> Option<String> {
     let cleaned: String = transcription
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '+' || c == '#' { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '+' || c == '#' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect();
     let words: Vec<&str> = cleaned.split_whitespace().collect();
-    if words.len() < 2 || words.len() > 4 || !triggers.iter().any(|t| t.trim().eq_ignore_ascii_case(words[0])) {
+    if words.len() < 2
+        || words.len() > 4
+        || !triggers
+            .iter()
+            .any(|t| t.trim().eq_ignore_ascii_case(words[0]))
+    {
         return None;
     }
     Some(words[1..].join(" "))

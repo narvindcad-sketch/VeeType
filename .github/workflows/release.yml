@@ -176,6 +176,9 @@ jobs:
           CMAKE_BUILD_PARALLEL_LEVEL: "1"
           CMAKE_PREFIX_PATH: D:\spirv-headers
           CMAKE_GENERATOR: Ninja
+          # Release binaries must not inherit the GitHub runner's CPU ISA.
+          # This matches transcribe.cpp/Handy's portable Windows build posture.
+          TRANSCRIBE_CMAKE_ARGS: -DTRANSCRIBE_X86_CONSERVATIVE=ON
 
       - name: Package Vulkan OTA archive
         shell: pwsh

@@ -46,7 +46,9 @@ impl Default for VoiceCommandConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            triggers: ["open", "launch", "start", "run"].map(String::from).to_vec(),
+            triggers: ["open", "launch", "start", "run"]
+                .map(String::from)
+                .to_vec(),
             aliases: Default::default(),
         }
     }
