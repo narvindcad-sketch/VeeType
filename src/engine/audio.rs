@@ -4,6 +4,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -24,6 +29,8 @@ pub struct AudioCapture {
     silence_samples: usize,
     speech_detected: bool,
     denoiser: Option<Box<DenoiseState<'static>>>,
+    stream_failed: Arc<AtomicBool>,
+    last_input_at: Instant,
 }
 
 /// RNNoise runs at 48 kHz on 480-sample frames; our 16 kHz frames are upsampled 3x,
@@ -57,8 +64,18 @@ impl AudioCapture {
         channels: usize,
         noise_suppression: bool,
     ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            native_sample_rate > 0 && channels > 0,
+            "Invalid microphone format"
+        );
         let ring_buffer = HeapRb::<f32>::new(16_000 * 60);
         let (mut producer, consumer) = ring_buffer.split();
+        let stream_failed = Arc::new(AtomicBool::new(false));
+        let failure_flag = Arc::clone(&stream_failed);
+        let on_error = move |error| {
+            failure_flag.store(true, Ordering::Release);
+            tracing::error!(%error, "Audio input stream error");
+        };
 
         let stream = match sample_format {
             cpal::SampleFormat::F32 => {
@@ -77,7 +94,7 @@ impl AudioCapture {
                             sample_index += 1;
                         }
                     },
-                    |error| tracing::error!(%error, "Audio input stream error"),
+                    on_error,
                     None,
                 )?
             }
@@ -101,7 +118,7 @@ impl AudioCapture {
                             sample_index += 1;
                         }
                     },
-                    |error| tracing::error!(%error, "Audio input stream error"),
+                    on_error,
                     None,
                 )?
             }
@@ -125,7 +142,7 @@ impl AudioCapture {
                             sample_index += 1;
                         }
                     },
-                    |error| tracing::error!(%error, "Audio input stream error"),
+                    on_error,
                     None,
                 )?
             }
@@ -143,15 +160,22 @@ impl AudioCapture {
             silence_samples: 0,
             speech_detected: false,
             denoiser: noise_suppression.then(DenoiseState::new),
+            stream_failed,
+            last_input_at: Instant::now(),
         })
     }
 
     fn process_pending_samples(&mut self) -> anyhow::Result<(f32, usize)> {
+        anyhow::ensure!(
+            !self.stream_failed.load(Ordering::Acquire),
+            "The microphone stream failed. Reconnect or select a microphone and try again."
+        );
         let mut voiced_energy = 0.0_f32;
         let mut voiced_frames = 0;
         let mut processed_frames = 0;
 
         while let Some(sample) = self.consumer.pop() {
+            self.last_input_at = Instant::now();
             self.pending_frame.push(sample);
             if self.pending_frame.len() != VAD_FRAME_SAMPLES {
                 continue;
@@ -179,6 +203,10 @@ impl AudioCapture {
 
             // VAD controls hands-free stopping, not what Whisper can hear.
             // Preserve quiet words and pauses in the original recording timeline.
+            anyhow::ensure!(
+                self.samples.len() + frame.len() <= 16_000 * 60 * 30,
+                "Recording reached the 30-minute safety limit"
+            );
             self.samples.extend_from_slice(&frame);
             voiced_energy += frame_energy;
             voiced_frames += 1;
@@ -190,6 +218,10 @@ impl AudioCapture {
             }
         }
 
+        anyhow::ensure!(
+            self.stream.is_none() || self.last_input_at.elapsed() < Duration::from_secs(5),
+            "The microphone stopped delivering audio. Check Windows microphone access and try again."
+        );
         let average_energy = if voiced_frames == 0 {
             0.0
         } else {
@@ -376,6 +408,33 @@ pub fn transcribe_media_file(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn stream_failure_is_reported_before_transcribing_partial_audio() {
+        let ring_buffer = ringbuf::HeapRb::<f32>::new(480);
+        let (_, consumer) = ring_buffer.split();
+        let mut capture = super::AudioCapture {
+            stream: None,
+            consumer,
+            samples: Vec::new(),
+            vad: webrtc_vad::Vad::new_with_rate_and_mode(
+                webrtc_vad::SampleRate::Rate16kHz,
+                webrtc_vad::VadMode::Quality,
+            ),
+            pending_frame: Vec::new(),
+            silence_samples: 0,
+            speech_detected: false,
+            denoiser: None,
+            stream_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            last_input_at: std::time::Instant::now(),
+        };
+        assert!(capture
+            .drain_samples()
+            .unwrap_err()
+            .to_string()
+            .contains("microphone stream failed"));
+        assert!(capture.finish().is_err());
+    }
+
+    #[test]
     fn recording_preserves_quiet_edges_and_a_pause_between_words() {
         let first_word = vec![0.001; 480];
         let pause = vec![0.0; 16_000];
@@ -399,6 +458,8 @@ mod tests {
             silence_samples: 0,
             speech_detected: false,
             denoiser: None,
+            stream_failed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_input_at: std::time::Instant::now(),
         };
         // Exercise the real VAD/draining path, including the incomplete tail.
         assert_eq!(capture.finish().unwrap(), expected);

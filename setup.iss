@@ -36,7 +36,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 [Files]
 Source: "target\release\VeeType.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
-Source: "config.example.toml"; DestDir: "{app}"; DestName: "config.toml"; Flags: onlyifdoesntexist
+Source: "config.example.toml"; DestDir: "{app}"; DestName: "config.toml"; Flags: onlyifdoesntexist uninsneveruninstall
 
 
 [Dirs]
@@ -46,9 +46,8 @@ Name: "{app}\Models"
 Name: "{group}\{#AppName}"; Filename: "{app}\VeeType.exe"; IconFilename: "{app}\icon.ico"; Check: not IsPortable
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\VeeType.exe"; Tasks: desktopicon; IconFilename: "{app}\icon.ico"; Check: not IsPortable
 
-[UninstallDelete]
-; Removes downloaded models, vault, config and logs that the installer did not create.
-Type: filesandordirs; Name: "{app}"
+; User models, configuration, history and logs are intentionally retained.
+; Uninstall removes only files tracked by the installer.
 
 [Run]
 Filename: "{app}\VeeType.exe"; Description: "Launch {#AppName} now"; Flags: nowait postinstall skipifsilent

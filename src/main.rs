@@ -468,8 +468,8 @@ fn ensure_whisper_engine(
     Ok(())
 }
 
-fn send_unicode_text(text: &str) -> anyhow::Result<()> {
-    text_input::send_text(text)
+fn send_unicode_text(text: &str, target: isize) -> anyhow::Result<()> {
+    text_input::send_text(text, target)
 }
 
 fn get_active_window_title() -> String {
@@ -690,7 +690,13 @@ fn run_app(
         || effective_provider.eq_ignore_ascii_case("openai")
         || effective_provider.eq_ignore_ascii_case("anthropic")
     {
-        Some(CloudLlm::from_config(&config)?)
+        match CloudLlm::from_config(&config) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                tracing::warn!(error = %error, "Cloud polishing unavailable; continuing with local dictation");
+                None
+            }
+        }
     } else {
         None
     };
@@ -777,7 +783,7 @@ fn run_app(
         .ok();
     let mut prompt_mode = PromptMode::Auto;
 
-    loop {
+    'dictation: loop {
         let mut quit_requested = false;
         loop {
             if last_model_use.is_some_and(|used_at| used_at.elapsed() >= Duration::from_secs(900)) {
@@ -998,7 +1004,9 @@ fn run_app(
                 continue;
             }
         };
+        let insertion_target = unsafe { GetForegroundWindow() };
         let active_exe = get_active_application_exe();
+        let active_title = get_active_window_title();
         let listening_started = Instant::now();
         tracing::info!("Audio capture started");
         // Show readiness only after the microphone stream has started.
@@ -1049,7 +1057,15 @@ fn run_app(
                 break;
             }
 
-            let (average_energy, frame_count) = capture.drain_samples()?;
+            let (average_energy, frame_count) = match capture.drain_samples() {
+                Ok(result) => result,
+                Err(error) => {
+                    drop(capture);
+                    overlay.hide()?;
+                    show_error_dialog("VeeType microphone disconnected", &format!("{error:#}"));
+                    continue 'dictation;
+                }
+            };
 
             if frame_count > 0 {
                 overlay.set_volume((average_energy / 0.08).clamp(0.0, 1.0))?;
@@ -1074,7 +1090,12 @@ fn run_app(
                 quit_requested = true;
                 break;
             }
-            capture.drain_samples()?;
+            if let Err(error) = capture.drain_samples() {
+                drop(capture);
+                overlay.hide()?;
+                show_error_dialog("VeeType microphone disconnected", &format!("{error:#}"));
+                continue 'dictation;
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
         overlay.hide()?;
@@ -1083,7 +1104,13 @@ fn run_app(
             break;
         }
 
-        let audio_samples = capture.finish()?;
+        let audio_samples = match capture.finish() {
+            Ok(samples) => samples,
+            Err(error) => {
+                show_error_dialog("VeeType microphone disconnected", &format!("{error:#}"));
+                continue;
+            }
+        };
 
         tracing::info!(
             elapsed_ms = listening_started.elapsed().as_millis(),
@@ -1129,21 +1156,23 @@ fn run_app(
             tracing::warn!(error = ?transcription_result.as_ref().err(), "GPU transcription failed; retrying retained audio on CPU");
             whisper_engine = None;
             whisper_scheduler.gpu_failed();
-            ensure_whisper_engine(
+            let fallback_loaded = ensure_whisper_engine(
                 &mut whisper_engine,
                 &whisper_model_path,
                 &mut whisper_scheduler,
-            )?;
+            );
             actual_backend = ComputeBackend::Cpu;
             transcription_started = Instant::now();
-            transcription_result = transcribe_with_engine(
-                whisper_engine.as_mut().expect("CPU fallback loaded"),
-                &audio_samples,
-                &config.settings.language,
-                config.settings.translate_to_english,
-                &whisper_prompt,
-                whisper_scheduler.thread_count(),
-            );
+            transcription_result = fallback_loaded.and_then(|()| {
+                transcribe_with_engine(
+                    whisper_engine.as_mut().expect("CPU fallback loaded"),
+                    &audio_samples,
+                    &config.settings.language,
+                    config.settings.translate_to_english,
+                    &whisper_prompt,
+                    whisper_scheduler.thread_count(),
+                )
+            });
         }
         if transcription_result.is_ok() {
             whisper_scheduler.record_performance(
@@ -1188,7 +1217,7 @@ fn run_app(
                 .filter(|mode| *mode != PromptMode::Auto)
                 .unwrap_or(prompt_mode);
             let window_title = if effective_mode == PromptMode::Auto {
-                get_active_window_title().to_lowercase()
+                active_title.to_lowercase()
             } else {
                 String::new()
             };
@@ -1252,6 +1281,10 @@ fn run_app(
             }
             generated_text = apply_voice_commands(&generated_text);
 
+            // Save the result before insertion so a denied Windows input request
+            // or a changed destination does not discard a successful dictation.
+            let vault_result =
+                ui::vault::save_entry(&app_dir.join("vault.json"), trimmed_raw, &generated_text);
             if !generated_text.is_empty() {
                 let mut insertion_text = generated_text.clone();
                 if insertion_text
@@ -1261,11 +1294,22 @@ fn run_app(
                 {
                     insertion_text.push(' ');
                 }
-                send_unicode_text(&insertion_text)?;
+                if let Err(error) = send_unicode_text(&insertion_text, insertion_target) {
+                    overlay.hide()?;
+                    tracing::warn!(error = %error, "Dictation insertion failed; app remains available");
+                    let recovery = if vault_result.is_ok() {
+                        "Your transcript is saved in Dictation Vault. Copy it from there."
+                    } else {
+                        "The transcript could not be saved. The app will remain running."
+                    };
+                    show_error_dialog(
+                        "VeeType could not insert the dictation",
+                        &format!("{error:#}\n\n{recovery}"),
+                    );
+                    continue;
+                }
             }
-            if let Err(error) =
-                ui::vault::save_entry(&app_dir.join("vault.json"), trimmed_raw, &generated_text)
-            {
+            if let Err(error) = vault_result {
                 show_error_dialog(
                     "Dictation was not added to the Vault",
                     &format!("{error:#}"),

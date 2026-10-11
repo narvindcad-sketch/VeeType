@@ -1,6 +1,6 @@
 # VeeType
 
-VeeType is a Windows desktop voice-dictation application. It transcribes speech locally with Whisper, supports vocabulary hints and prompt modes, and can polish text with a local model or an optional Groq/OpenAI-compatible cloud provider.
+VeeType is a Windows desktop voice-dictation application. It transcribes speech locally with Whisper or Parakeet, supports vocabulary hints and prompt modes, and can polish text with a local model or an optional cloud provider. See [production validation and remaining gaps](docs/PRODUCTION_AUDIT.md) for the tested scope.
 
 The [`index.html`](index.html) file is a product landing page. Its interactive demo displays sample text only; it does not record audio or connect to the desktop application.
 
@@ -21,7 +21,7 @@ The [`index.html`](index.html) file is a product landing page. Its interactive d
 
 VeeType is a regular desktop app when you open it: its control window appears so you can review settings, models, history, and updates. When **Start with Windows** is enabled, it instead starts quietly in the system tray and becomes visible only when you open it or use its tray menu.
 
-The idle process is event-driven. It does not poll the keyboard, keep the microphone stream open, or animate the hidden overlay. Whisper and the optional local polishing model load only when a dictation needs them, stay warm briefly for follow-up dictation, and are released after two minutes of inactivity. The first dictation after launch or that idle timeout therefore takes a little longer while its model loads; later dictations are faster.
+The idle process is event-driven. It does not poll the keyboard, keep the microphone stream open, or animate the hidden overlay. Speech and optional local polishing models load when dictation needs them, remain available for follow-up dictation, and are released after fifteen minutes of inactivity. Parakeet runs in a persistent child process to protect the desktop from native speech-engine failures. The first dictation after launch or the idle timeout takes longer while its model loads.
 
 ## Build
 

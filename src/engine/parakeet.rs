@@ -2,9 +2,10 @@
 
 use anyhow::Context;
 use std::io::{BufReader, Read, Write};
+use std::os::windows::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::time::Duration;
 use transcribe_cpp::{Backend, Model, ModelOptions, RunOptions, SessionOptions, Task};
 
@@ -25,7 +26,7 @@ enum WorkerResponse {
 /// instructions, and Vulkan driver failures therefore cannot terminate VeeType.
 pub struct ParakeetWorker {
     child: Child,
-    stdin: ChildStdin,
+    requests: SyncSender<Vec<f32>>,
     responses: Receiver<WorkerResponse>,
     architecture: String,
 }
@@ -41,9 +42,10 @@ impl ParakeetWorker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
             .spawn()
             .context("Starting the isolated Parakeet engine")?;
-        let stdin = child
+        let mut stdin = child
             .stdin
             .take()
             .context("Opening Parakeet worker input")?;
@@ -52,7 +54,25 @@ impl ParakeetWorker {
             .take()
             .context("Opening Parakeet worker output")?;
         let (sender, responses) = mpsc::channel();
-        std::thread::Builder::new()
+        let write_errors = sender.clone();
+        let (requests, request_receiver) = mpsc::sync_channel::<Vec<f32>>(1);
+        let writer = std::thread::Builder::new()
+            .name("parakeet-request-writer".into())
+            .spawn(move || {
+                while let Ok(samples) = request_receiver.recv() {
+                    if let Err(error) = write_audio_request(&mut stdin, &samples) {
+                        let _ =
+                            write_errors.send(WorkerResponse::Disconnected(format!("{error:#}")));
+                        break;
+                    }
+                }
+            });
+        if let Err(error) = writer {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("Starting Parakeet request writer");
+        }
+        let reader = std::thread::Builder::new()
             .name("parakeet-response-reader".into())
             .spawn(move || {
                 let mut reader = BufReader::new(stdout);
@@ -68,12 +88,16 @@ impl ParakeetWorker {
                         return;
                     }
                 }
-            })
-            .context("Starting Parakeet response monitor")?;
+            });
+        if let Err(error) = reader {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("Starting Parakeet response monitor");
+        }
 
         let mut worker = Self {
             child,
-            stdin,
+            requests,
             responses,
             architecture: String::new(),
         };
@@ -107,18 +131,12 @@ impl ParakeetWorker {
         if samples.len() > MAX_AUDIO_SAMPLES {
             anyhow::bail!("Dictation is longer than the 30-minute safety limit");
         }
-        let count = u32::try_from(samples.len()).context("Dictation buffer is too large")?;
-        self.stdin
-            .write_all(&count.to_le_bytes())
-            .context("Sending audio length to Parakeet")?;
-        let mut audio_bytes = Vec::with_capacity(std::mem::size_of_val(samples));
-        for sample in samples {
-            audio_bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-        self.stdin
-            .write_all(&audio_bytes)
-            .context("Sending audio to Parakeet")?;
-        self.stdin.flush().context("Submitting audio to Parakeet")?;
+        // Pipe writes may block if a native worker hangs before reading input.
+        // Send on a separate thread so the deadline covers transport as well
+        // as inference. Killing the child releases any blocked pipe write.
+        self.requests
+            .try_send(samples.to_vec())
+            .context("Submitting audio to Parakeet")?;
 
         let audio_seconds = samples.len() as u64 / 16_000;
         let timeout = Duration::from_secs((audio_seconds.saturating_mul(3) + 60).clamp(90, 600));
@@ -180,6 +198,12 @@ pub fn maybe_run_from_arguments() -> Option<i32> {
 }
 
 fn run_worker(model_path: &Path, backend: Backend, threads: i32) -> anyhow::Result<()> {
+    unsafe {
+        windows_sys::Win32::System::Threading::SetPriorityClass(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            windows_sys::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS,
+        );
+    }
     let mut output = std::io::stdout().lock();
     let result = (|| -> anyhow::Result<(Model, transcribe_cpp::Session)> {
         let model = Model::load_with(
@@ -219,7 +243,7 @@ fn run_worker(model_path: &Path, backend: Backend, threads: i32) -> anyhow::Resu
         let count = u32::from_le_bytes(count_bytes) as usize;
         if count > MAX_AUDIO_SAMPLES {
             write_response(&mut output, 2, "Audio request exceeds the safety limit")?;
-            continue;
+            anyhow::bail!("Audio request exceeds the safety limit");
         }
         let byte_count = count
             .checked_mul(std::mem::size_of::<f32>())
@@ -242,6 +266,29 @@ fn run_worker(model_path: &Path, backend: Backend, threads: i32) -> anyhow::Resu
             Err(error) => write_response(&mut output, 2, &error.to_string())?,
         }
     }
+}
+
+fn write_audio_request(output: &mut impl Write, samples: &[f32]) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        samples.len() <= MAX_AUDIO_SAMPLES,
+        "Audio request exceeds the safety limit"
+    );
+    anyhow::ensure!(
+        samples.iter().all(|sample| sample.is_finite()),
+        "Audio contains non-finite samples"
+    );
+    output.write_all(&(samples.len() as u32).to_le_bytes())?;
+    // Bounded conversion storage avoids a second recording-sized allocation.
+    let mut bytes = Vec::with_capacity(4096 * 4);
+    for chunk in samples.chunks(4096) {
+        bytes.clear();
+        for sample in chunk {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        output.write_all(&bytes)?;
+    }
+    output.flush()?;
+    Ok(())
 }
 
 fn write_response(output: &mut impl Write, kind: u8, message: &str) -> anyhow::Result<()> {
@@ -277,6 +324,30 @@ fn read_response(input: &mut impl Read) -> anyhow::Result<WorkerResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_protocol_preserves_samples_across_conversion_chunks() {
+        let samples: Vec<f32> = (0..9001).map(|i| (i as f32 * 0.001).sin()).collect();
+        let mut bytes = Vec::new();
+        write_audio_request(&mut bytes, &samples).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 9001);
+        let restored: Vec<f32> = bytes[4..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
+            .collect();
+        assert_eq!(restored, samples);
+    }
+
+    #[test]
+    fn audio_protocol_rejects_non_finite_samples_before_writing() {
+        for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut bytes = Vec::new();
+            assert!(write_audio_request(&mut bytes, &[sample]).is_err());
+            assert!(bytes.is_empty());
+        }
+    }
 
     #[test]
     fn response_protocol_round_trips_unicode() {

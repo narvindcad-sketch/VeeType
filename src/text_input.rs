@@ -19,11 +19,10 @@ fn deliver(
     Ok(())
 }
 
-pub fn send_text(text: &str) -> anyhow::Result<()> {
+pub fn send_text(text: &str, target: isize) -> anyhow::Result<()> {
     if text.is_empty() {
         return Ok(());
     }
-    let target = unsafe { GetForegroundWindow() };
     anyhow::ensure!(target != 0, "No foreground window for dictation");
     deliver(
         text,
@@ -74,6 +73,11 @@ pub fn send_text(text: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn invalid_original_destination_is_rejected_without_sending_input() {
+        assert!(send_text("Never send to an unrelated window", 0).is_err());
+    }
 
     #[test]
     fn preserves_exact_text_and_surrogate_pairs() {
