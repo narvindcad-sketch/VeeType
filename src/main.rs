@@ -174,6 +174,43 @@ fn installed_whisper_model(app_dir: &Path, preferred: &str) -> Option<PathBuf> {
     fallback.is_file().then_some(fallback)
 }
 
+fn input_device_config(
+    host: &cpal::Host,
+    selected_name: Option<&str>,
+) -> anyhow::Result<(cpal::Device, cpal::StreamConfig, cpal::SampleFormat, u32, usize)> {
+    let device = match selected_name.filter(|name| !name.trim().is_empty()) {
+        Some(selected_name) => match host
+            .input_devices()?
+            .find(|device| device.name().is_ok_and(|name| name == selected_name))
+        {
+            Some(device) => device,
+            None => {
+                tracing::warn!(
+                    configured_device = selected_name,
+                    "Configured microphone is unavailable; using the Windows default input device"
+                );
+                host.default_input_device().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Configured microphone {:?} is unavailable and Windows has no default microphone",
+                        selected_name
+                    )
+                })?
+            }
+        },
+        None => host
+            .default_input_device()
+            .ok_or_else(|| anyhow::anyhow!("No microphone input device is available"))?,
+    };
+    let supported_config = device
+        .default_input_config()
+        .context("Could not read microphone format")?;
+    let sample_format = supported_config.sample_format();
+    let stream_config: cpal::StreamConfig = supported_config.into();
+    let native_sample_rate = stream_config.sample_rate.0;
+    let channels = stream_config.channels as usize;
+    Ok((device, stream_config, sample_format, native_sample_rate, channels))
+}
+
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -519,7 +556,7 @@ fn main() {
 
 fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> {
     let app_dir = application_directory()?;
-    let config = load_config(&app_dir)?;
+    let mut config = load_config(&app_dir)?;
     let whisper_model_available =
         installed_whisper_model(&app_dir, &config.settings.whisper_model).is_some();
     if !config.settings.has_completed_onboarding {
@@ -550,7 +587,7 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
     // registry key on every launch: managed Windows installations can deny
     // registry writes, which previously prevented VeeType from starting even
     // when auto-start was disabled.
-    let _registered_hotkey = RegisteredHotkey::register(&config.settings.hotkey)?;
+    let mut registered_hotkey = RegisteredHotkey::register(&config.settings.hotkey)?;
     if config.settings.max_tokens == 0 {
         anyhow::bail!("settings.max_tokens must be greater than zero");
     }
@@ -572,20 +609,19 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
     if config.settings.silence_timeout_ms > 60_000 {
         anyhow::bail!("settings.silence_timeout_ms must not exceed 60000");
     }
-    let max_new_tokens = config.settings.max_tokens;
     let selected_provider = config.provider();
-    let effective_provider = effective_provider(selected_provider, &entitlements);
-    let hands_free_enabled = hands_free_enabled(config.settings.hands_free, &entitlements);
+    let mut effective_provider = effective_provider(selected_provider, &entitlements).to_string();
+    let mut hands_free_enabled = hands_free_enabled(config.settings.hands_free, &entitlements);
     tracing::info!(
         hotkey = %config.settings.hotkey,
-        max_tokens = max_new_tokens,
+        max_tokens = config.settings.max_tokens,
         provider = effective_provider,
         language = %config.settings.language,
         translate_to_english = config.settings.translate_to_english,
         "Configuration loaded"
     );
 
-    let cloud_llm = if effective_provider.eq_ignore_ascii_case("groq")
+    let mut cloud_llm = if effective_provider.eq_ignore_ascii_case("groq")
         || effective_provider.eq_ignore_ascii_case("openai")
         || effective_provider.eq_ignore_ascii_case("anthropic")
     {
@@ -611,7 +647,7 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
     let mut local_llm_unavailable = false;
 
     // The installer ships no models. Keep Settings accessible while the user downloads one.
-    let whisper_model_path = if let Some(path) =
+    let mut whisper_model_path = if let Some(path) =
         installed_whisper_model(&app_dir, &config.settings.whisper_model)
     {
         path
@@ -669,45 +705,11 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
     let mut last_model_use: Option<Instant> = None;
 
     let host = cpal::default_host();
-    let device = match config
-        .settings
-        .input_device
-        .as_deref()
-        .filter(|name| !name.trim().is_empty())
-    {
-        Some(selected_name) => match host
-            .input_devices()?
-            .find(|device| device.name().is_ok_and(|name| name == selected_name))
-        {
-            Some(device) => device,
-            None => {
-                // USB/Bluetooth device names regularly change after a driver
-                // update or reconnect.  Falling back keeps dictation usable
-                // instead of making the tray app exit at startup.
-                tracing::warn!(
-                    configured_device = selected_name,
-                    "Configured microphone is unavailable; using the Windows default input device"
-                );
-                host.default_input_device().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Configured microphone {:?} is unavailable and Windows has no default microphone",
-                        selected_name
-                    )
-                })?
-            }
-        },
-        None => host
-            .default_input_device()
-            .ok_or_else(|| anyhow::anyhow!("No microphone input device is available"))?,
-    };
-    let supported_config = device.default_input_config()?;
-    let sample_format = supported_config.sample_format();
-    let stream_config: cpal::StreamConfig = supported_config.into();
-    let native_sample_rate = stream_config.sample_rate.0;
-    let channels = stream_config.channels as usize;
-
-    let silence_limit = (16_000_u64 * config.settings.silence_timeout_ms / 1_000) as usize;
-    let whisper_prompt = vocabulary_prompt(&config.vocabulary);
+    let mut silence_limit = (16_000_u64 * config.settings.silence_timeout_ms / 1_000) as usize;
+    let mut whisper_prompt = vocabulary_prompt(&config.vocabulary);
+    let mut config_modified = fs::metadata(app_dir.join("config.toml"))
+        .and_then(|metadata| metadata.modified())
+        .ok();
     let mut prompt_mode = PromptMode::Auto;
 
     loop {
@@ -803,7 +805,71 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
                 break;
             }
             if wait_for_windows_activity(wake_event, 30_000)? {
-                if let Err(error) = open_settings_window() {
+                let updated_modified = fs::metadata(app_dir.join("config.toml"))
+                    .and_then(|metadata| metadata.modified())
+                    .ok();
+                if updated_modified != config_modified {
+                    config_modified = updated_modified;
+                    match load_config(&app_dir) {
+                        Ok(updated_config) if is_valid_hotkey(updated_config.settings.hotkey.trim()) => {
+                            if updated_config.settings.hotkey != config.settings.hotkey {
+                                drop(registered_hotkey);
+                                registered_hotkey = match RegisteredHotkey::register(&updated_config.settings.hotkey) {
+                                    Ok(hotkey) => hotkey,
+                                    Err(error) => {
+                                        show_error_dialog("Could not apply VeeType hotkey", &format!("{error:#}"));
+                                        RegisteredHotkey::register(&config.settings.hotkey)?
+                                    }
+                                };
+                            }
+                            let new_model = installed_whisper_model(
+                                &app_dir,
+                                &updated_config.settings.whisper_model,
+                            );
+                            if new_model.as_ref().is_some_and(|path| path != &whisper_model_path) {
+                                whisper_model_path = new_model.expect("model path was checked");
+                                whisper_engine = None;
+                                last_model_use = None;
+                            }
+                            hands_free_enabled = engine::hands_free_enabled(
+                                updated_config.settings.hands_free,
+                                &entitlements,
+                            );
+                            silence_limit = (16_000_u64
+                                * updated_config.settings.silence_timeout_ms.clamp(1, 60_000)
+                                / 1_000) as usize;
+                            whisper_prompt = vocabulary_prompt(&updated_config.vocabulary);
+                            effective_provider = engine::effective_provider(
+                                updated_config.provider(),
+                                &entitlements,
+                            )
+                            .to_string();
+                            cloud_llm = if effective_provider.eq_ignore_ascii_case("local") {
+                                None
+                            } else {
+                                match CloudLlm::from_config(&updated_config) {
+                                    Ok(client) => Some(client),
+                                    Err(error) => {
+                                        tracing::warn!(error = %error, "Updated cloud provider could not be initialized");
+                                        None
+                                    }
+                                }
+                            };
+                            local_llm = None;
+                            local_llm_unavailable = false;
+                            config = updated_config;
+                            tracing::info!("Applied saved VeeType settings without restart");
+                        }
+                        Ok(_) => show_error_dialog(
+                            "Could not apply VeeType settings",
+                            "The selected hotkey is not supported.",
+                        ),
+                        Err(error) => show_error_dialog(
+                            "Could not reload VeeType settings",
+                            &format!("{error:#}"),
+                        ),
+                    }
+                } else if let Err(error) = open_settings_window() {
                     tracing::error!(error = %error, "Could not open Settings for the running VeeType instance");
                     show_error_dialog("Could not open VeeType Settings", &format!("{error:#}"));
                 }
@@ -813,14 +879,36 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
             break;
         }
 
-        let mut capture = AudioCapture::start(
+        let (device, stream_config, sample_format, native_sample_rate, channels) =
+            match input_device_config(&host, config.settings.input_device.as_deref()) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::error!(error = %error, "No usable microphone is available");
+                    show_error_dialog(
+                        "VeeType could not find a microphone",
+                        &format!("{error:#}\n\nConnect or enable a microphone, then try again. VeeType will remain running."),
+                    );
+                    continue;
+                }
+            };
+        let mut capture = match AudioCapture::start(
             &device,
             &stream_config,
             sample_format,
             native_sample_rate,
             channels,
             config.settings.noise_suppression,
-        )?;
+        ) {
+            Ok(capture) => capture,
+            Err(error) => {
+                tracing::error!(error = %error, "Could not open microphone input stream");
+                show_error_dialog(
+                    "VeeType could not start the microphone",
+                    &format!("{error:#}\n\nCheck Windows microphone privacy permissions and the selected input device. VeeType will remain running."),
+                );
+                continue;
+            }
+        };
         let active_exe = get_active_application_exe();
         let listening_started = Instant::now();
         tracing::info!("Audio capture started");

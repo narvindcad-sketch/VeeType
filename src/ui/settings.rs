@@ -10,6 +10,21 @@ use crate::config::{load_config, save_config, AppConfig, AppProfile};
 use crate::engine::downloader::Download;
 use crate::engine::{KeyVault, OtaUpdater};
 use crate::utils::hotkey::{is_hotkey_pressed, is_valid_hotkey, pressed_hotkey};
+use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+
+const APP_WAKE_EVENT: &str = "Global\\VeeTypeAppWake";
+
+fn signal_running_app() {
+    let event_name: Vec<u16> = APP_WAKE_EVENT.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let event = OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr());
+        if event != 0 {
+            SetEvent(event);
+            CloseHandle(event);
+        }
+    }
+}
 
 pub fn run(app_dir: PathBuf) -> anyhow::Result<()> {
     let config = load_config(&app_dir)?;
@@ -226,13 +241,14 @@ impl SettingsApp {
                 (!self.model.trim().is_empty()).then(|| self.model.trim().to_string());
             crate::engine::startup::set_enabled(self.config.settings.auto_start)?;
             save_config(&self.app_dir, &self.config)?;
+            signal_running_app();
             Ok(())
         })();
 
         self.status = Some(match result {
             Ok(()) => (
                 true,
-                "Settings saved. Restart VeeType to apply the changes.".into(),
+                "Settings saved and applied to VeeType.".into(),
             ),
             Err(error) => (false, format!("Could not save settings: {error:#}")),
         });
@@ -510,7 +526,10 @@ impl SettingsApp {
         self.status = Some(match save_config(&self.app_dir, &self.config) {
             Ok(()) => (
                 true,
-                "Setup complete. Restart VeeType to apply the model and hotkey.".into(),
+                {
+                    signal_running_app();
+                    "Setup complete. Settings are applied automatically.".into()
+                },
             ),
             Err(error) => (false, format!("Could not save settings: {error:#}")),
         });
