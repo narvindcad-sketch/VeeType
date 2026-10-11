@@ -10,13 +10,38 @@ use crate::config::{load_config, save_config, AppConfig, AppProfile};
 use crate::engine::downloader::Download;
 use crate::engine::{KeyVault, OtaUpdater};
 use crate::utils::hotkey::{is_hotkey_pressed, is_valid_hotkey, pressed_hotkey};
-use windows_sys::Win32::Foundation::CloseHandle;
-use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE};
+use windows_sys::Win32::System::Threading::{CreateMutexW, OpenEventW, SetEvent, EVENT_MODIFY_STATE};
 
-const APP_WAKE_EVENT: &str = "Global\\VeeTypeAppWake";
+const APP_CONFIG_EVENT: &str = "Global\\VeeTypeConfigChanged";
+const SETTINGS_WINDOW_MUTEX: &str = "Global\\VeeTypeSettingsWindow";
+
+struct SettingsWindowGuard(HANDLE);
+
+impl SettingsWindowGuard {
+    fn acquire() -> anyhow::Result<Option<Self>> {
+        let mutex_name: Vec<u16> = SETTINGS_WINDOW_MUTEX.encode_utf16().chain(Some(0)).collect();
+        unsafe { SetLastError(0) };
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr()) };
+        if handle == 0 {
+            anyhow::bail!("Could not create the Settings window mutex (Windows error {})", unsafe { GetLastError() });
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle) };
+            return Ok(None);
+        }
+        Ok(Some(Self(handle)))
+    }
+}
+
+impl Drop for SettingsWindowGuard {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
 
 fn signal_running_app() {
-    let event_name: Vec<u16> = APP_WAKE_EVENT.encode_utf16().chain(Some(0)).collect();
+    let event_name: Vec<u16> = APP_CONFIG_EVENT.encode_utf16().chain(Some(0)).collect();
     unsafe {
         let event = OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr());
         if event != 0 {
@@ -27,6 +52,9 @@ fn signal_running_app() {
 }
 
 pub fn run(app_dir: PathBuf) -> anyhow::Result<()> {
+    let Some(_window_guard) = SettingsWindowGuard::acquire()? else {
+        return Ok(());
+    };
     let config = load_config(&app_dir)?;
     let logo = image::load_from_memory(include_bytes!("../../icon.ico"))
         .context("Could not decode the VeeType application icon")?

@@ -52,12 +52,14 @@ static HOTKEY_TRIGGERED: AtomicBool = AtomicBool::new(false);
 struct SingleInstanceGuard {
     mutex: HANDLE,
     wake_event: HANDLE,
+    config_event: HANDLE,
 }
 
 impl SingleInstanceGuard {
     fn acquire() -> anyhow::Result<Option<Self>> {
         const MUTEX_NAME: &str = "Global\\VeeTypeAppMutex";
         const EVENT_NAME: &str = "Global\\VeeTypeAppWake";
+        const CONFIG_EVENT_NAME: &str = "Global\\VeeTypeConfigChanged";
 
         let event_name = wide(EVENT_NAME);
         let wake_event = unsafe { CreateEventW(std::ptr::null(), 0, 0, event_name.as_ptr()) };
@@ -66,6 +68,13 @@ impl SingleInstanceGuard {
                 "Could not create the VeeType wake event (Windows error {})",
                 unsafe { GetLastError() }
             );
+        }
+        let config_event_name = wide(CONFIG_EVENT_NAME);
+        let config_event = unsafe { CreateEventW(std::ptr::null(), 0, 0, config_event_name.as_ptr()) };
+        if config_event == 0 {
+            let error = unsafe { GetLastError() };
+            unsafe { CloseHandle(wake_event) };
+            anyhow::bail!("Could not create the VeeType configuration event (Windows error {error})");
         }
 
         let mutex_name = wide(MUTEX_NAME);
@@ -77,6 +86,7 @@ impl SingleInstanceGuard {
             let error = unsafe { GetLastError() };
             unsafe {
                 CloseHandle(wake_event);
+                CloseHandle(config_event);
             }
             anyhow::bail!(
                 "Could not create the VeeType single-instance mutex (Windows error {error})"
@@ -92,6 +102,7 @@ impl SingleInstanceGuard {
                 let error = unsafe { GetLastError() };
                 unsafe {
                     CloseHandle(wake_event);
+                    CloseHandle(config_event);
                 }
                 anyhow::bail!(
                     "VeeType is already running, but its wake event could not be opened (Windows error {error})"
@@ -102,6 +113,7 @@ impl SingleInstanceGuard {
             unsafe {
                 CloseHandle(event);
                 CloseHandle(wake_event);
+                CloseHandle(config_event);
             }
             if !signaled {
                 anyhow::bail!(
@@ -111,7 +123,7 @@ impl SingleInstanceGuard {
             return Ok(None);
         }
 
-        Ok(Some(Self { mutex, wake_event }))
+        Ok(Some(Self { mutex, wake_event, config_event }))
     }
 }
 
@@ -119,6 +131,7 @@ impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
         unsafe {
             CloseHandle(self.wake_event);
+            CloseHandle(self.config_event);
             CloseHandle(self.mutex);
         }
     }
@@ -236,18 +249,34 @@ fn take_hotkey_trigger() -> bool {
     HOTKEY_TRIGGERED.swap(false, Ordering::AcqRel)
 }
 
-fn wait_for_windows_activity(wake_event: HANDLE, timeout_ms: u32) -> anyhow::Result<bool> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowsActivity {
+    OpenSettings,
+    SettingsChanged,
+    Message,
+    Timeout,
+}
+
+fn wait_for_windows_activity(
+    wake_event: HANDLE,
+    config_event: HANDLE,
+    timeout_ms: u32,
+) -> anyhow::Result<WindowsActivity> {
+    let handles = [wake_event, config_event];
     let result = unsafe {
-        MsgWaitForMultipleObjectsEx(1, &wake_event, timeout_ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+        MsgWaitForMultipleObjectsEx(2, handles.as_ptr(), timeout_ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
     };
     if result == WAIT_OBJECT_0 {
-        return Ok(true);
+        return Ok(WindowsActivity::OpenSettings);
     }
     if result == WAIT_OBJECT_0 + 1 {
-        return Ok(false);
+        return Ok(WindowsActivity::SettingsChanged);
     }
     if result == WAIT_TIMEOUT {
-        return Ok(false);
+        return Ok(WindowsActivity::Timeout);
+    }
+    if result == WAIT_OBJECT_0 + 2 {
+        return Ok(WindowsActivity::Message);
     }
     if result == WAIT_FAILED {
         anyhow::bail!(
@@ -541,7 +570,7 @@ fn main() {
         application_directory().and_then(ui::settings::run)
     } else {
         match single_instance.as_ref() {
-            Some(guard) => run_app(guard.wake_event, !is_background),
+            Some(guard) => run_app(guard.wake_event, guard.config_event, !is_background),
             None => Err(anyhow::anyhow!(
                 "The main application instance guard was not initialized"
             )),
@@ -554,7 +583,7 @@ fn main() {
     }
 }
 
-fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> {
+fn run_app(wake_event: HANDLE, config_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> {
     let app_dir = application_directory()?;
     let mut config = load_config(&app_dir)?;
     let whisper_model_available =
@@ -804,7 +833,8 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
             if take_hotkey_trigger() {
                 break;
             }
-            if wait_for_windows_activity(wake_event, 30_000)? {
+            match wait_for_windows_activity(wake_event, config_event, 30_000)? {
+                WindowsActivity::SettingsChanged => {
                 let updated_modified = fs::metadata(app_dir.join("config.toml"))
                     .and_then(|metadata| metadata.modified())
                     .ok();
@@ -869,10 +899,15 @@ fn run_app(wake_event: HANDLE, show_control_center: bool) -> anyhow::Result<()> 
                             &format!("{error:#}"),
                         ),
                     }
-                } else if let Err(error) = open_settings_window() {
+                }
+                }
+                WindowsActivity::OpenSettings => {
+                    if let Err(error) = open_settings_window() {
                     tracing::error!(error = %error, "Could not open Settings for the running VeeType instance");
                     show_error_dialog("Could not open VeeType Settings", &format!("{error:#}"));
+                    }
                 }
+                WindowsActivity::Message | WindowsActivity::Timeout => {}
             }
         }
         if quit_requested {
