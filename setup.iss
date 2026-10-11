@@ -1,6 +1,6 @@
 #define AppName "VeeType"
 #ifndef AppVersion
-#define AppVersion "0.3.4"
+#define AppVersion "0.3.5"
 #endif
 #define AppPublisher "VeeType"
 

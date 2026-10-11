@@ -315,17 +315,18 @@ fn load_whisper_engine(
     requested_backend: ComputeBackend,
 ) -> anyhow::Result<LoadedWhisper> {
     if whisper_model_path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) {
-        let requested = match requested_backend {
-            ComputeBackend::Cpu => transcribe_cpp::Backend::Cpu,
-            ComputeBackend::Gpu => transcribe_cpp::Backend::Vulkan,
-        };
+        // Parakeet GGUF currently has an unreliable Vulkan initialization path
+        // on some Windows drivers: the process can disappear after recording
+        // and before it returns a transcript. Keep this newer engine on CPU
+        // until its GPU runtime is proven stable; standard Whisper models
+        // below retain adaptive GPU acceleration.
+        if requested_backend == ComputeBackend::Gpu {
+            tracing::info!("Using CPU for the universal speech model to avoid unstable Vulkan startup");
+        }
+        let requested = transcribe_cpp::Backend::Cpu;
         let options = transcribe_cpp::ModelOptions { backend: requested, device: None };
         let model = match transcribe_cpp::Model::load_with(whisper_model_path, &options) {
             Ok(model) => model,
-            Err(gpu_error) if requested_backend == ComputeBackend::Gpu => {
-                tracing::warn!(error = %gpu_error, "Universal speech-model GPU initialization failed; retrying on CPU");
-                return load_whisper_engine(whisper_model_path, ComputeBackend::Cpu);
-            }
             Err(error) => return Err(error).with_context(|| format!("Loading universal speech model {}", whisper_model_path.display())),
         };
         let architecture = model.arch();
@@ -333,10 +334,10 @@ fn load_whisper_engine(
             n_threads: engine::worker_thread_count() as i32,
             ..Default::default()
         }).context("Creating universal speech-model session")?;
-        tracing::info!(backend = ?requested_backend, architecture, "Universal speech model loaded");
+        tracing::info!(backend = ?ComputeBackend::Cpu, architecture, "Universal speech model loaded");
         return Ok(LoadedWhisper {
             engine: SpeechEngine::Universal { _model: model, session, architecture },
-            backend: requested_backend,
+            backend: ComputeBackend::Cpu,
         });
     }
     let mut ctx_params = WhisperContextParameters::default();
