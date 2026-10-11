@@ -12,11 +12,7 @@ use anyhow::Context;
 pub const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
 
 fn model_url(file_name: &str) -> String {
-    match file_name {
-        "parakeet-unified-en-0.6b-Q8_0.gguf" =>
-            "https://blob.handy.computer/handy-computer/parakeet-unified-en-0.6b-gguf/7e948f21b7bdbac698d3318db9d350f1096f3b6c/parakeet-unified-en-0.6b-Q8_0.gguf".to_string(),
-        _ => format!("{MODEL_BASE_URL}{file_name}"),
-    }
+    format!("{MODEL_BASE_URL}{file_name}")
 }
 
 pub struct Download {
@@ -128,11 +124,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn routes_handys_parakeet_model_to_its_publisher() {
-        assert_eq!(
-            model_url("parakeet-unified-en-0.6b-Q8_0.gguf"),
-            "https://blob.handy.computer/handy-computer/parakeet-unified-en-0.6b-gguf/7e948f21b7bdbac698d3318db9d350f1096f3b6c/parakeet-unified-en-0.6b-Q8_0.gguf"
-        );
+    fn routes_whisper_models_to_the_official_repository() {
         assert!(model_url("ggml-base.en.bin").starts_with(MODEL_BASE_URL));
     }
 }

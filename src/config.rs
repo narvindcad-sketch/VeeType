@@ -110,7 +110,7 @@ pub struct Settings {
 }
 
 fn default_whisper_model() -> String {
-    "ggml-base.bin".to_string()
+    "ggml-base.en.bin".to_string()
 }
 
 fn default_provider() -> String {

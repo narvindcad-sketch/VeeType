@@ -1,6 +1,6 @@
 [package]
 name = "VeeType"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 
 [dependencies]
@@ -11,7 +11,6 @@ anyhow = "1.0"
 
 # Whisper AI bindings with optional cross-vendor Vulkan acceleration.
 whisper-rs = "0.16"
-transcribe-cpp = { version = "0.3.1", default-features = false }
 
 keyring = "2"
 
@@ -49,7 +48,7 @@ strsim = "0.11"
 walkdir = "2.5"
 
 [features]
-vulkan = ["llama-cpp-2/vulkan", "whisper-rs/vulkan", "transcribe-cpp/vulkan"]
+vulkan = ["llama-cpp-2/vulkan", "whisper-rs/vulkan"]
 test-bypass = []
 
 [profile.release]

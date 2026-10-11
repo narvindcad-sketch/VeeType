@@ -180,11 +180,17 @@ fn application_directory() -> anyhow::Result<PathBuf> {
 fn installed_whisper_model(app_dir: &Path, preferred: &str) -> Option<PathBuf> {
     let models_dir = app_dir.join("Models");
     let selected = models_dir.join(preferred.trim());
-    if selected.is_file() {
+    if selected.is_file()
+        && selected
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
+    {
         return Some(selected);
     }
-    let fallback = models_dir.join("ggml-base.bin");
-    fallback.is_file().then_some(fallback)
+    ["ggml-base.en.bin", "ggml-base.bin"]
+        .into_iter()
+        .map(|file| models_dir.join(file))
+        .find(|path| path.is_file())
 }
 
 fn input_device_config(
@@ -298,11 +304,6 @@ enum SpeechEngine {
         _context: WhisperContext,
         state: whisper_rs::WhisperState,
     },
-    Universal {
-        _model: transcribe_cpp::Model,
-        session: transcribe_cpp::Session,
-        architecture: String,
-    },
 }
 
 struct LoadedWhisper {
@@ -314,32 +315,6 @@ fn load_whisper_engine(
     whisper_model_path: &Path,
     requested_backend: ComputeBackend,
 ) -> anyhow::Result<LoadedWhisper> {
-    if whisper_model_path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")) {
-        // Parakeet GGUF currently has an unreliable Vulkan initialization path
-        // on some Windows drivers: the process can disappear after recording
-        // and before it returns a transcript. Keep this newer engine on CPU
-        // until its GPU runtime is proven stable; standard Whisper models
-        // below retain adaptive GPU acceleration.
-        if requested_backend == ComputeBackend::Gpu {
-            tracing::info!("Using CPU for the universal speech model to avoid unstable Vulkan startup");
-        }
-        let requested = transcribe_cpp::Backend::Cpu;
-        let options = transcribe_cpp::ModelOptions { backend: requested, device: None };
-        let model = match transcribe_cpp::Model::load_with(whisper_model_path, &options) {
-            Ok(model) => model,
-            Err(error) => return Err(error).with_context(|| format!("Loading universal speech model {}", whisper_model_path.display())),
-        };
-        let architecture = model.arch();
-        let session = model.session_with(&transcribe_cpp::SessionOptions {
-            n_threads: engine::worker_thread_count() as i32,
-            ..Default::default()
-        }).context("Creating universal speech-model session")?;
-        tracing::info!(backend = ?ComputeBackend::Cpu, architecture, "Universal speech model loaded");
-        return Ok(LoadedWhisper {
-            engine: SpeechEngine::Universal { _model: model, session, architecture },
-            backend: ComputeBackend::Cpu,
-        });
-    }
     let mut ctx_params = WhisperContextParameters::default();
     ctx_params.use_gpu(requested_backend == ComputeBackend::Gpu);
     let mut actual_backend = requested_backend;
@@ -399,29 +374,7 @@ fn transcribe_with_engine(
         SpeechEngine::Whisper { state, .. } => transcribe_audio(
             state, samples, language, translate_to_english, prompt, n_threads,
         ),
-        SpeechEngine::Universal { session, architecture, .. } => {
-            // The currently shipped universal model is Parakeet. It is an
-            // English transcription model and has no translation head. The
-            // global translation preference belongs to Whisper, so forwarding
-            // it here makes the runtime reject dictation as an unsupported
-            // task (the preference defaults to `true` in older installations).
-            let options = transcribe_cpp::RunOptions {
-                task: universal_transcription_task(translate_to_english),
-                language: (!language.eq_ignore_ascii_case("auto")).then(|| language.to_string()),
-                ..Default::default()
-            };
-            session.run(samples, &options)
-                .map(|result| result.text)
-                .map_err(|error| anyhow::anyhow!("{architecture} transcription failed: {error}"))
-        }
     }
-}
-
-fn universal_transcription_task(_translate_to_english: bool) -> transcribe_cpp::Task {
-    // Universal models advertise their capabilities at runtime. Until a
-    // translation-capable universal model is added, transcription is the one
-    // supported and reliable operation for this engine family.
-    transcribe_cpp::Task::Transcribe
 }
 
 fn ensure_whisper_engine(
@@ -810,9 +763,6 @@ fn run_app(wake_event: HANDLE, config_event: HANDLE, show_control_center: bool) 
                                 config.settings.translate_to_english, &whisper_prompt,
                                 &config.vocabulary, whisper_scheduler.thread_count(),
                             ),
-                            SpeechEngine::Universal { .. } => Err(anyhow::anyhow!(
-                                "Media-file transcription currently requires a Whisper model"
-                            )),
                         };
                         match result {
                             Ok(transcript_path) => {
@@ -1202,7 +1152,7 @@ fn run_app(wake_event: HANDLE, config_event: HANDLE, show_control_center: bool) 
 
 #[cfg(test)]
 mod tests {
-    use super::{installed_whisper_model, universal_transcription_task};
+    use super::installed_whisper_model;
     use crate::config::{AppConfig, PromptMode, Prompts};
     use crate::engine::audio::{apply_vocabulary, vocabulary_prompt};
     use std::collections::HashMap;
@@ -1359,10 +1309,17 @@ mod tests {
     }
 
     #[test]
-    fn universal_models_transcribe_when_legacy_translation_is_enabled() {
-        assert_eq!(
-            universal_transcription_task(true),
-            transcribe_cpp::Task::Transcribe
-        );
+    fn rejects_unsupported_gguf_models_before_native_loading() {
+        let app_dir = std::env::temp_dir().join(format!(
+            "veetype-unsupported-model-test-{}",
+            std::process::id()
+        ));
+        let models_dir = app_dir.join("Models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::fs::write(models_dir.join("unstable.gguf"), []).unwrap();
+
+        assert!(installed_whisper_model(&app_dir, "unstable.gguf").is_none());
+
+        std::fs::remove_dir_all(app_dir).unwrap();
     }
 }

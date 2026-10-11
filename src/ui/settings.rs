@@ -284,7 +284,7 @@ impl SettingsApp {
 
     fn import_model(&mut self) {
         let Some(source) = rfd::FileDialog::new()
-            .add_filter("GGUF models", &["gguf", "bin"])
+            .add_filter("Whisper models", &["bin"])
             .pick_file()
         else {
             return;
@@ -351,7 +351,7 @@ impl SettingsApp {
                 }
             }
 
-            if ui.button("Import GGUF model...").clicked() {
+            if ui.button("Import Whisper model...").clicked() {
                 self.import_model();
             }
         });
@@ -1274,8 +1274,8 @@ fn copy_model(source: &Path, models_dir: &Path) -> anyhow::Result<PathBuf> {
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default();
-    if !extension.eq_ignore_ascii_case("gguf") && !extension.eq_ignore_ascii_case("bin") {
-        anyhow::bail!("Only .gguf and .bin model files can be imported");
+    if !extension.eq_ignore_ascii_case("bin") {
+        anyhow::bail!("Only Whisper .bin model files can be imported");
     }
     let file_name = source
         .file_name()
@@ -1321,16 +1321,6 @@ struct CatalogModel {
 
 static MODEL_CATALOG: &[CatalogModel] = &[
     CatalogModel {
-        name: "Parakeet Unified EN 0.6B",
-        description: "Handy-compatible English model with fast, accurate transcription.",
-        file: "parakeet-unified-en-0.6b-Q8_0.gguf",
-        size: "731 MB",
-        languages: "English",
-        speed: 0.95,
-        accuracy: 0.94,
-        recommended: true,
-    },
-    CatalogModel {
         name: "Whisper Large v3 Turbo",
         description: "Best offline accuracy, optimized for speed.",
         file: "ggml-large-v3-turbo.bin",
@@ -1358,7 +1348,7 @@ static MODEL_CATALOG: &[CatalogModel] = &[
         languages: "English",
         speed: 0.92,
         accuracy: 0.72,
-        recommended: false,
+        recommended: true,
     },
     CatalogModel {
         name: "Whisper Tiny (English)",
@@ -2536,8 +2526,7 @@ mod catalog_tests {
         let mut seen = std::collections::HashSet::new();
         for model in MODEL_CATALOG {
             assert!(
-                (model.file.starts_with("ggml-") && model.file.ends_with(".bin"))
-                    || model.file.ends_with(".gguf")
+                model.file.starts_with("ggml-") && model.file.ends_with(".bin")
             );
             assert!(seen.insert(model.file), "duplicate {}", model.file);
         }
